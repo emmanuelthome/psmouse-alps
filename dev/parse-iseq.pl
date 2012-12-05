@@ -3,6 +3,8 @@
 use warnings;
 use strict;
 
+select(STDOUT); $|=1;
+
 my $lexikon = {
     e6 => ["SETSCALE11", 0, 0, ],
     e7 => ["SETSCALE21", 0, 0, ],
@@ -51,11 +53,13 @@ my $retcodes = {
 my @queue;
 
 sub get {
+    local $_;
     if (defined($_ = shift @queue)) {
         return $_;
     }
     while (1) {
         return unless defined($_=<>);
+        chomp($_);
         return $_ unless /^$/ || /^#/;
     }
 }
@@ -107,12 +111,26 @@ sub parse_action {
     my @recv = ();
     for(my $i = 0 ; $i < $nrecv ; $i++) {
         defined($_=get) or die "uh ?";
-        if ($name eq 'RESET_BAT' && $i == $nrecv - 1 && /^S /) {
-            push @recv, " missing 3rd byte (?!)";
-            unget $_;
-            last;
+        if ($name eq 'RESET_BAT' && /^S /) {
+            my @normal = qw/aa 00/;
+            my $next = get;
+            print STDERR "Next is <$next>, comparing with <R $normal[$i]>\n";
+            if ($next =~ /^R $normal[$i]/) {
+                print STDERR "/* Swapping <$next> and <$_> in queue */\n";
+                print STDERR "/* Putting back <$_> */\n";
+                unget $_;
+                $_ = $next;
+            } else {
+                my $miss = $nrecv - $i;
+                push @recv, " missing $miss byte(s) (?!)";
+                print STDERR "/* Undo lookahead <$next> */\n";
+                unget $next;
+                print STDERR "/* Putting back <$_> */\n";
+                unget $_;
+                last;
+            }
         }
-        /^R (..)$/ or die "unexpected $_ at line $.";
+        /^R (..)$/ or die "unexpected $_ at line $. (cmd=$name, i=$i)";
         push @recv, "0x$1";
     }
 
@@ -429,17 +447,24 @@ my $capture = [];
 if ($inputformat == 0) {
     while (1) {
         my $x = parse_action or last;
-        push @$capture, $x;
+        if ($outputformat == 2) {
+            push @$capture, $x;
+        } else {
+            print "$x\n";
+        }
     }
 } else {
     while (defined($_=<>)) {
-        push @$capture, $_;
+        if ($outputformat == 2) {
+            push @$capture, $_;
+        } else {
+            print "$_\n";
+        }
     }
 }
 
 # Maybe stay with this level 1.
 if ($outputformat == 1) {
-    print "$_\n" for @$capture;
     exit 0;
 }
 
@@ -451,6 +476,8 @@ PARSE: while (scalar @$capture) {
         ($code, $command, @seq) = &$f($capture);
         do { print "$command\n"; next PARSE; } if $code;
     }
-    my $nleft = scalar @$capture;
-    die "$capture->[0] ($nleft left)?";
+    print STDERR "Parse error: $capture->[0]\n";
+    shift @$capture;
+    # my $nleft = scalar @$capture;
+    # die "$capture->[0] ($nleft left)?";
 }

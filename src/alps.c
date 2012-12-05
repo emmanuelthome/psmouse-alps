@@ -1115,6 +1115,8 @@ static int alps_command_mode_check_reg(struct psmouse * psmouse, int addr, u8 va
         if (reg_val < 0) return -1;
         if (reg_val != value) {
                 psmouse_info(psmouse, "register %04x: got value %2.2x, differs from expected %2.2x", addr, reg_val, value);
+        } else {
+            psmouse_info(psmouse, "register %04x: got value %2.2x", addr, reg_val);
         }
         return reg_val == value;
 }
@@ -1745,7 +1747,11 @@ error:
 static int alps_hw_init_v5(struct psmouse *psmouse)
 {
 	unsigned char param[4];
+	struct alps_data *priv = psmouse->private;
         int ok = 1;
+
+	priv->nibble_commands = alps_v3_nibble_commands;
+        priv->addr_command = PSMOUSE_CMD_RESET_WRAP;;
 
         ok = ok && !psmouse_reset(psmouse);
         // ok = ok && !psmouse_reset(psmouse);
@@ -1759,7 +1765,6 @@ static int alps_hw_init_v5(struct psmouse *psmouse)
         /* unconditional */
         alps_exit_command_mode(psmouse);
         if (!ok) return -1;
-        ok = 1;
 
         ok = ok && !alps_get_e7_report(psmouse, param);
 
@@ -1788,16 +1793,19 @@ static int alps_hw_init_v5(struct psmouse *psmouse)
         /* In C:
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
 	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
+	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);         // c
+	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);      // 2
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
 	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
+	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);         // c
+	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);      // 2
 	param[0] = 0xc8;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
+	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);        // 9
 	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
         */
+        /* Looks like plausibly a copy-paste failure, where register c2d9
+         * should be queried ? But then, the v5bis init only _queries_
+         * this register anyway... */
 
         ok = ok && !alps_command_mode_write_reg(psmouse, 0xc2cb, 0x00);
         ok = ok && !alps_command_mode_checkset_reg(psmouse, 0xc2c8, 0x82);
@@ -1816,6 +1824,10 @@ static int alps_hw_init_v5bis(struct psmouse *psmouse)
 
 	priv->nibble_commands = alps_v3_nibble_commands;
         priv->addr_command = PSMOUSE_CMD_RESET_WRAP;;
+
+#if 0
+        /* I suspect that this init part is in fact not necessary */
+        /* Test confirms */
 
         ok = ok && !psmouse_reset(psmouse);
 
@@ -1837,6 +1849,7 @@ static int alps_hw_init_v5bis(struct psmouse *psmouse)
         ok = ok && !alps_command_mode_send_nibble(psmouse, 0xf);
         if (!ok)
                 return -1;
+#endif
 
         /* windows: enable, disable */
 
@@ -1848,7 +1861,6 @@ static int alps_hw_init_v5bis(struct psmouse *psmouse)
 	if (alps_exit_command_mode(psmouse))
 		goto alps_hw_init_v5bis;
 	*/
-        ok = 1;
 
         ok = ok && !alps_enter_command_mode(psmouse, NULL);
         ok = ok && alps_command_mode_check_reg(psmouse, 0xc2c8, 0x00) > 0;
@@ -1861,6 +1873,71 @@ static int alps_hw_init_v5bis(struct psmouse *psmouse)
 
         /* Do this unconditionally */
 	alps_exit_command_mode(psmouse);
+
+        ok = ok && !alps_set_rate_and_enable(psmouse, 0x64);
+
+        return ok ? 0 : -1;
+}
+
+static int alps_hw_init_v5_unified(struct psmouse *psmouse)
+{
+	struct alps_data *priv = psmouse->private;
+	unsigned char param[4];
+        int ok = 1;
+        int reg_val;
+        int has_trackstick;
+
+	priv->nibble_commands = alps_v3_nibble_commands;
+        priv->addr_command = PSMOUSE_CMD_RESET_WRAP;;
+
+        ok = ok && !psmouse_reset(psmouse);
+        ok = ok && !alps_enter_command_mode(psmouse, NULL);
+        if (!ok) return -1;
+
+        ok = ok && (reg_val = alps_command_mode_read_reg(psmouse, 0xc2c8)) >= 0;
+        if (!ok) {
+            alps_exit_command_mode(psmouse);
+            return -1;
+        }
+
+        /* we assume this means a trackstick exists */
+        has_trackstick = reg_val & 0x80;
+
+        if (has_trackstick) {
+            /* I guess this means set passthrough mode */
+            ok = ok && !__alps_command_mode_write_reg(psmouse, 0x81);
+            // other option would be reg_val | 0x01 instead of 0x81
+
+            alps_exit_command_mode(psmouse);
+            if (!ok) return -1;
+
+            if (alps_get_e7_report(psmouse, param)) {
+                psmouse_warn(psmouse, "trackstick E7 report failed\n");
+                /* Don't fail completely. Just proceed as if we had no
+                 * trackstick. */
+                has_trackstick = 0;
+            } else {
+                psmouse_dbg(psmouse,
+                        "trackstick E7 report: %2.2x %2.2x %2.2x\n",
+                        param[0], param[1], param[2]);
+                /* This magic sequence is trackstick-specific */
+                ok = ok && !alps_e6_sort_of_setmode(psmouse, 0x94);
+            }
+
+            ok = ok && !alps_enter_command_mode(psmouse, NULL);
+            /* now disable passthrough mode, but also more than that (bit 1) */
+            ok = ok && !alps_command_mode_checkset_reg(psmouse, 0xc2c8,
+                    has_trackstick ? 0x82 : 0x00);
+	}
+
+        ok = ok && !alps_command_mode_checkset_reg(psmouse, 0xc2c4, 0x02);
+        ok = ok && alps_command_mode_check_reg(psmouse, 0xc2d9, 0x00) > 0;
+
+        ok = ok && !alps_command_mode_write_reg(psmouse, 0xc2cb, 0x00);
+        ok = ok && !alps_command_mode_checkset_reg(psmouse, 0xc2c8,
+                has_trackstick ? 0x82 : 0x00);
+
+        alps_exit_command_mode(psmouse);
 
         ok = ok && !alps_set_rate_and_enable(psmouse, 0x64);
 
@@ -1986,7 +2063,7 @@ static int alps_hw_init(struct psmouse *psmouse)
 		ret = alps_hw_init_v4(psmouse);
 		break;
 	case ALPS_PROTO_V5:
-		ret = alps_hw_init_v5bis(psmouse);
+		ret = alps_hw_init_v5_unified(psmouse);
 		break;
 	case ALPS_PROTO_V6:
 		ret = alps_hw_init_v6(psmouse);
