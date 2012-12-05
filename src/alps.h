@@ -12,6 +12,12 @@
 #ifndef _ALPS_H
 #define _ALPS_H
 
+/* Define this for special handling of the Alps touchpad on an N5110
+   WARNING: when this is defined, the psmouse driver will not work with
+   for any other ALPS hardware.
+ */
+#define MOD_DST 1
+
 #define ALPS_PROTO_V1	0
 #define ALPS_PROTO_V2	1
 #define ALPS_PROTO_V3	2
