@@ -18,7 +18,7 @@
 
 # for build/install the psmouse/alps driver
 # Update the DLKM version before doing dlkm_install*
-DLKM=alps-dst-1.0
+DLKM=alps-dst-1.1
 KERN=$(uname -r)
 
 # for Qemu reverse engineering
@@ -350,7 +350,16 @@ function run_tune_alps() {
        xinput set-prop $ID_TP "Synaptics Edge Scrolling" 1 0 0
    fi
 
-   xinput list-props $ID_TP
+   echo "0: enabled, 1: disabled, 2: enabled/tapping and edge scrolling disabled"
+   xinput list-props $ID_TP | grep "Synaptics Off"
+
+   echo "get X properties"
+   xset q
+
+   echo "set mouse accel to 40 after 4 mickeys. Larger than 50 seems to make no difference"
+   xset m 50/10 4
+   xinput set-ptr-feedback $ID_TP 4 50 10
+
 }
 
 function git() {
