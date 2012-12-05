@@ -1028,6 +1028,20 @@ static int alps_command_mode_send_nibble(struct psmouse *psmouse, int nibble)
 	return 0;
 }
 
+static int alps_command_mode_put_configword(struct psmouse *psmouse, uint16_t word)
+{
+	struct ps2dev *ps2dev = &psmouse->ps2dev;
+	int i, nibble;
+
+	for (i = 12; i >= 0; i -= 4) {
+		nibble = (word >> i) & 0xf;
+		if (alps_command_mode_send_nibble(psmouse, nibble))
+			return -1;
+	}
+
+	return 0;
+}
+
 static int alps_command_mode_set_addr(struct psmouse *psmouse, int addr)
 {
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
@@ -1764,6 +1778,122 @@ static int alps_hw_init_v5(struct psmouse *psmouse)
 	return 0;
 }
 
+static int alps_hw_init_v5_mine(struct psmouse *psmouse)
+{
+	struct alps_data *priv = psmouse->private;
+	struct ps2dev *ps2dev = &psmouse->ps2dev;
+	unsigned char param[4];
+	int reg_val;
+
+	priv->nibble_commands = alps_v3_nibble_commands;
+        priv->addr_command = PSMOUSE_CMD_RESET_WRAP;;
+
+	if (psmouse_reset(psmouse)) return -1;
+	if (psmouse_reset(psmouse)) return -1;
+
+        /* ??? bracketing around the put_configword() calls ? */
+	/* ALPS_CMD_NIBBLE_10 is the same as GETID, but expects only one byte */
+        ps2_command(ps2dev, param, ALPS_CMD_NIBBLE_10);
+
+        /* E6 report */
+	/* leaving this out, as I believe that the E6 report is mere
+         * diagnostics, not action. It has been queried already in
+	 * alps_get_model.
+	 *
+	param[0] = 0;
+	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES) ||
+	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
+	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
+	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11))
+		return -1;
+	param[0] = param[1] = param[2] = 0xff;
+	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
+		return -1;
+	*/
+	
+	/* E6 report already printed by get_model */
+
+
+	alps_command_mode_put_configword(psmouse, 0xe987);
+	alps_command_mode_put_configword(psmouse, 0xa997);
+
+        /* ??? */
+        ps2_command(ps2dev, param, ALPS_CMD_NIBBLE_10);
+
+
+        /* Set rate and enable data reporting */
+	param[0] = 0x64;
+	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE))
+            goto alps_hw_init_v5_mine_error;
+	/* not clear what this call is for... */
+	param[0] = 0x03;
+	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES))
+            goto alps_hw_init_v5_mine_error;
+
+	/*
+        if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE))
+            goto alps_hw_init_v5_mine_error;
+        if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_DISABLE))
+            goto alps_hw_init_v5_mine_error;
+	*/
+
+        /* make sure we're out of command mode ? */
+	/*
+	if (alps_exit_command_mode(psmouse))
+		goto alps_hw_init_v5_mine_error;
+	*/
+
+	if (alps_enter_command_mode(psmouse, NULL))
+		goto alps_hw_init_v5_mine_error;
+
+	reg_val = alps_command_mode_read_reg(psmouse, 0xc2c8);
+	if (reg_val != 0x00)
+		goto alps_hw_init_v5_mine_error;
+
+	reg_val = alps_command_mode_read_reg(psmouse, 0xc2c4);
+	if (reg_val != 0x00)
+		goto alps_hw_init_v5_mine_error;
+	if (__alps_command_mode_write_reg(psmouse, 0x02))
+		goto alps_hw_init_v5_mine_error;
+
+	reg_val = alps_command_mode_read_reg(psmouse, 0xc2d9);
+	if (reg_val != 0x00)
+		goto alps_hw_init_v5_mine_error;
+	/*
+	*/
+
+	if (alps_command_mode_write_reg(psmouse, 0xc2cb, 0x00))
+		goto alps_hw_init_v5_mine_error;
+
+	reg_val = alps_command_mode_read_reg(psmouse, 0xc2c8);
+	if (reg_val != 0x00)
+		goto alps_hw_init_v5_mine_error;
+	/*
+	if (__alps_command_mode_write_reg(psmouse, 0x00))
+		goto alps_hw_init_v5_mine_error;
+	*/
+
+	alps_exit_command_mode(psmouse);
+
+	/* Set rate and enable data reporting */
+	param[0] = 0x64;
+	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE) ||
+	    ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE)) {
+		psmouse_err(psmouse, "Failed to enable data reporting\n");
+		return -1;
+	}
+
+	return 0;
+alps_hw_init_v5_mine_error:
+	/*
+	 * Leaving the touchpad in command mode will essentially render
+	 * it unusable until the machine reboots, so exit it here just
+	 * to be safe
+	 */
+	alps_exit_command_mode(psmouse);
+	return -1;
+}
+
 static int alps_hw_init_v6(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
@@ -1930,7 +2060,7 @@ static int alps_hw_init(struct psmouse *psmouse)
 		ret = alps_hw_init_v4(psmouse);
 		break;
 	case ALPS_PROTO_V5:
-		ret = alps_hw_init_v5(psmouse);
+		ret = alps_hw_init_v5_mine(psmouse);
 		break;
 	case ALPS_PROTO_V6:
 		ret = alps_hw_init_v6(psmouse);
