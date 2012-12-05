@@ -18,7 +18,7 @@
 
 # for build/install the psmouse/alps driver
 # Update the DLKM version before doing dlkm_install*
-DLKM=alps-dst-0.4
+DLKM=alps-dst-1.0
 KERN=$(uname -r)
 
 # for Qemu reverse engineering
@@ -320,7 +320,7 @@ function run_tune_alps() {
    echo "make sure this guy is enabled"
    xinput set-prop $ID_TP 132 1
 
-   echo "Get the Velocity Scaling property and set it to a faster value"
+   echo "Set touchpad cursor speed"
    xinput set-prop $ID_TP "Device Accel Velocity Scaling" 40
 
    echo "X/Y origin is upper left corner and grows to lower right corner"
@@ -328,7 +328,7 @@ function run_tune_alps() {
    xinput set-prop --type=int $ID_TP "Synaptics Edges" 40 1300 40 650
    xinput list-props $ID_TP | grep "Synaptics Edges"
 
-   if [ 0 ]; then
+   if [ ]; then
        echo "Enable tap action"
        xinput set-prop $ID_TP "Synaptics Tap Action" 2 3 0 0 1 3 0
    else
@@ -349,6 +349,18 @@ function run_tune_alps() {
        xinput set-prop $ID_TP "Synaptics Two-Finger Scrolling" 0 0
        xinput set-prop $ID_TP "Synaptics Edge Scrolling" 1 0 0
    fi
+
+   xinput list-props $ID_TP
+}
+
+function git() {
+
+    mkdir /opt/distros/linux-source
+
+    git clone git://git.kernel.org/pub/scm/linux/kernel/git/dtor/input.git
+
+    echo "v3.X linux tree"
+    http://git.kernel.org/?p=linux/kernel/git/torvalds/linux.git;a=summary
 }
 
 a_parseargs $*

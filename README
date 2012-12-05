@@ -1,4 +1,4 @@
-$Id: README 716 2012-09-28 02:35:00Z dturvene $
+$Id: README 720 2012-10-02 00:14:28Z dturvene $
 
 History
 -------
@@ -16,6 +16,9 @@ History
 0.4: integrate multi-touch support from florin9doi
      default alps_debug=0, can be enabled through sysfs
      code cleanup
+0.5: elevate persistent syslog to psmouse_info for production/release capture
+      of alps signature and command response - both of which determine control 
+      protocol
 
 Background
 ----------
