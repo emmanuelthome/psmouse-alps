@@ -1,4 +1,4 @@
-$Id: README 713 2012-09-21 03:28:35Z dturvene $
+$Id: README 716 2012-09-28 02:35:00Z dturvene $
 
 History
 -------
@@ -13,11 +13,10 @@ History
      added signature for Dell I17R 7720 based on user confirmaton to V6 protocol
      disable multi-touch for V6 protocol
      include alps.sh helper scripts
+0.4: integrate multi-touch support from florin9doi
+     default alps_debug=0, can be enabled through sysfs
+     code cleanup
 
-Todo
-----
-* multi-touch support
-     
 Background
 ----------
 This README documents my work to reverse engineer the Alps touchpad on a

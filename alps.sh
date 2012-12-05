@@ -1,6 +1,5 @@
 #!/bin/bash
 # -*-shell-script-*-
-# $Id: alps.sh 712 2012-09-21 03:27:40Z dturvene $
 #
 # Alps touchpad driver analysis
 #
@@ -18,12 +17,15 @@
 #  https://github.com/bgamari/linux/tree/alps
 
 # for build/install the psmouse/alps driver
-DLKM=alps-dst-0.3
+# Update the DLKM version before doing dlkm_install*
+DLKM=alps-dst-0.4
 KERN=$(uname -r)
 
 # for Qemu reverse engineering
-dev_serio="/dev/serio_raw0"
-guest_img="v3.img"
+guest_img=v6.img
+guest_os=$HOME/Documents/ISO/vista32.iso
+# physical mem to use, bigger is better until it impacts linux
+qemumem=2048
 
 # Runtime control of psmouse/alps driver
 ID_TP=$(xinput --list | grep "AlpsPS/2" | sed -e 's/.*id=\([1-9]\+\).*/\1/')
@@ -90,6 +92,8 @@ function dkms_build_alps() {
 }
 
 function dkms_pkg_tarball() {
+    cd $HOME
+
     echo "create a tarball with bz2 compression, exclude version control files"
     tar --exclude-vcs -jhcvf  $HOME/psmouse-$DLKM.tbz /usr/src/psmouse-$DLKM
 
@@ -104,12 +108,26 @@ function dkms_pkg_tarball() {
 
 function qemu_make() {
 
+  echo 
+
+  echo "First timed, call qemu_clean_and_config to set up config"
   cd /opt/distros/Qemu/qemu-1.1.1
-  ./configure --enable-debug --target-list=x86_64-softmmu
-  make V=1 > make.$(date +%y%m%d) 2>&1
+
+  echo "clean build objects and rebuild"
+  make clean
+  make -j4 V=1 > make.$(date +%y%m%d) 2>&1
 
   echo "Installs in /usr/local: bin, share/qemu, etc/qemu"
   sudo make install
+}
+
+function qemu_clean_and_config() {
+  cd /opt/distros/Qemu/qemu-1.1.1
+
+  echo "cleans all built files plus: config, doc"
+  make distclean
+  ./configure --enable-debug --target-list=x86_64-softmmu
+
 }
 
 function qemu_create() {
@@ -119,15 +137,14 @@ function qemu_create() {
   echo "check cpu support for each processor"
   egrep "flags.*:.*(svm|vmx)" /proc/cpuinfo
 
-
   # See https://help.ubuntu.com/community/Installation/QemuEmulator
-  # echo "Create an initial virtual img - 16G is enough to run vista"
-  # echo "  if need more use qemu_grow_img"
-  # qemu-img create $guest_img 16G
-  # echo "Boot from iso and install to img, only need to do this once"
-  # qemu-system-x86_64 -m 2048 -cdrom vista32.iso -hda $guest_img -boot d
-  # echo "once install, reboot to make sure things work"
-  # qemu-system-x86_64 -m 1024 -hda $guest_img
+  echo "Create an initial virtual img - 16G is enough to run vista"
+  echo "  if need more use qemu_grow_img"
+  qemu-img create $guest_img 16G
+  echo "Boot from iso and install to img, only need to do this once"
+  qemu-system-x86_64 -m $qemumem -cdrom $guest_os -hda $guest_img -boot d
+  echo "once install, reboot to make sure things work"
+  qemu-system-x86_64 -m $qemumem -hda $guest_img
 
 }
 
@@ -141,22 +158,26 @@ function qemu_run() {
   echo "WARNING: This creates $dev_serio, now must use a usb mouse"
   sudo sh -c 'echo -n "serio_raw" > /sys/bus/serio/devices/serio1/drvctl'
   # echo "switch back"
-  # echo -n "psmouse" > /sys/bus/serio/devices/serio1/drvctl
+  # sudo sh -c 'echo -n "psmouse" > /sys/bus/serio/devices/serio1/drvctl'
+
+  dev_serio="/dev/serio_raw6"
 
   echo "Make $dev_serio globally read/write to run qemu"
   sudo chmod go+rw $dev_serio
 
   export PSMOUSE_SERIO_DEV_PATH=$dev_serio
-  export PSMOUSE_SERIO_LOG_PATH=./cap2.txt
-  echo $PSMOUSE_SERIO_DEV_PATH $PSMOUSE_SERIO_LOG_PATH
+  export PSMOUSE_SERIO_LOG_PATH=./cap.4.txt
+  ls -l $PSMOUSE_SERIO_DEV_PATH $PSMOUSE_SERIO_LOG_PATH
+  # unset PSMOUSE_SERIO_DEV_PATH PSMOUSE_SERIO_LOG_PATH
 
-  echo "cp vista.iso and alps drivers here"
   cd /opt/distros/Qemu
 
   echo "Boot from image; Check pc-bios/bios.bin is updated"
-  # nice -10 qemu-system-x86_64 -m 2048 -hda $guest_img -L mybios
-  # nice -10 qemu-1.1.1/x86_64-softmmu/qemu-system-x86_64 -m 1500 -hda v5.img -L mybios
-  qemu-system-x86_64 -m 1500 -hda v5.img -chardev stdio,id=seabios -device isa-debugcon,iobase=0x402,chardev=seabios
+  qemu-system-x86_64 -m $qemumem -hda $guest_img -chardev stdio,id=seabios -device isa-debugcon,iobase=0x402,chardev=seabios
+
+  echo "Run local with KVM enabled"
+  /opt/distros/Qemu/qemu-1.1.1/x86_64-softmmu/qemu-system-x86_64 -m 2048 -hda /opt/distros/Qemu/v6.img -machine accel=kvm,kernel_irqchip=on
+
 }
 
 function qemu_add_driver() {
@@ -176,6 +197,8 @@ function qemu_add_driver() {
   echo "copy alps drivers to image"
   cp R305170.exe /mnt/loop/Users/dave/Documents
 
+  echo "when the driver is being installed it will be put under /dell/drivers/R305170"
+
   echo "unmount loop device and check that /dev/loop is released"
   sudo umount /mnt/loop
   sudo losetup -f
@@ -192,9 +215,10 @@ function qemu_grow_img() {
     truncate --size=+4G $guest_img
 }
 
-
 function qemu_update_bios() {
   echo "must run/test qemu_make first"
+  echo "for distro: /opt/distros/Qemu/qemu-1.1.1/pc-bios/bios.bin"
+  echo "for install: /usr/local/share/qemu/bios.bin"
 
   echo "edit src/acpi-dsdt.dsl using qemu patch as basis"
   echo "The PS2M device for N5110 is DLL04B0"
@@ -210,6 +234,18 @@ function qemu_update_bios() {
   cp -vup ../pc-bios/bios.bin /opt/distro/Qemu/mybios
 
   echo "should not have to rebuild"
+}
+
+qemu_mon() {
+
+    echo "enter mon mode: C-A 2"
+
+    echo "serial port: C-A 3"
+
+    info roms
+    info mice
+
+    echo "exit mon mode: C-A 1"
 }
 
 ############################## runtime control #######################
@@ -272,9 +308,7 @@ function run_tp_check() {
     echo "print info about psmouse mod"
     modinfo psmouse
 
-    ID_TP=$(xinput --list | grep "AlpsPS/2" | sed -e 's/.*id=\([1-9]\+\).*/\1/')
     echo "Alps is on id=$ID_TP"
-
     echo "Device enabled should be 1"
     xinput --list-props $ID_TP | grep "Device Enabled"
 }
@@ -287,23 +321,34 @@ function run_tune_alps() {
    xinput set-prop $ID_TP 132 1
 
    echo "Get the Velocity Scaling property and set it to a faster value"
-   CSPD=$(xinput list-props $ID_TP | grep "Velocity Scaling" | sed -e 's/.*(\([0-9]\+\)).*/\1/')
-   xinput set-prop $ID_TP $CSPD 40
-
-   # Multi-touch pulled from internet, have not tested
-   # xinput --set-prop --type=int --format=32 15 "Synaptics Two-Finger Pressure" 125
-   # xinput --set-prop --type=int --format=32 15 "Synaptics Two-Finger Width" 0
-   # xinput --set-prop --type=int --format=8  15 "Synaptics Two-Finger Scrolling" 1 1
-
-   echo "enable edge scrolling for virt only"
-   ES=$(xinput list-props $ID_TP | grep "Edge Scrolling" | sed -e 's/.*(\([0-9]\+\)).*/\1/')
-   xinput set-prop $ID_TP --type=int $ES 1 0 0
-   xinput list-props $ID_TP | grep $ES
+   xinput set-prop $ID_TP "Device Accel Velocity Scaling" 40
 
    echo "X/Y origin is upper left corner and grows to lower right corner"
-   echo "values: left right top bottom.  original 150 920 150 650"
-   xinput set-prop --type=int $ID_TP "Synaptics Edges" 40 1200 40 650
+   echo "values: left right top bottom.  Physical edge is 1360 660"
+   xinput set-prop --type=int $ID_TP "Synaptics Edges" 40 1300 40 650
    xinput list-props $ID_TP | grep "Synaptics Edges"
+
+   if [ 0 ]; then
+       echo "Enable tap action"
+       xinput set-prop $ID_TP "Synaptics Tap Action" 2 3 0 0 1 3 0
+   else
+       echo "Disable tap action"
+       xinput set-prop $ID_TP "Synaptics Tap Action" 0 0 0 0 0 0 0
+   fi
+
+   echo "Multi-touch settings"
+   xinput set-prop $ID_TP "Synaptics Two-Finger Pressure" 125
+   xinput set-prop $ID_TP "Synaptics Two-Finger Width" 7
+
+   if [ 1 ]; then
+       echo "enable two-finger scrolling, disable edge scrolling"
+       xinput set-prop $ID_TP "Synaptics Two-Finger Scrolling" 1 0
+       xinput set-prop $ID_TP "Synaptics Edge Scrolling" 0 0 0
+   else
+       echo "disable two-finger scrolling, enable edge scrolling for vertical only"
+       xinput set-prop $ID_TP "Synaptics Two-Finger Scrolling" 0 0
+       xinput set-prop $ID_TP "Synaptics Edge Scrolling" 1 0 0
+   fi
 }
 
 a_parseargs $*

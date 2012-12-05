@@ -7,19 +7,28 @@
  * Copyright (c) 2005 Vojtech Pavlik <vojtech@suse.cz>
  * Copyright (c) 2009 Sebastian Kapfer <sebastian_kapfer@gmx.net>
  *
- * ALPS detection, tap switching and status querying info is taken from
- * tpconfig utility (by C. Scott Ananian and Bruce Kall).
+ * 2012: A large number of contributors have added to this driver
+ * for new alps touchpads.  The V5 and V6 initialization protocols are taken
+ * empirically from qemu virtual guest os dumps using the procedure at
+ *   http://swapspace.forshee.me/2011/11/touchpad-protocol-reverse-engineering.html
+ * The qemu DSDT interface had to be updated for the dirver to recognize the
+ * REAL alps touchpad rather than a generic ps2 mouse.
+ * The code authors recognize little of the logic behind V5 and V6 initialization.
+ *
+ * The tpconfig utility was used to reverse engineer some of the older alps
+ * touchpads.  After 2.6 it has marginal use, and should not be used.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published by
  * the Free Software Foundation.
  */
 
-/* Indicator for my changes */
-#define MOD_DST
-
-/* enable psmouse_dbg, comment out to reduce code size */
-#define DEBUG
+/* enable psmouse_dbg, comment out to reduce code size
+   Note that this allows the alps_debug kernel param accessed at
+    /sys/module/psmouse/parameters/alps_debug
+   to control runtime debug
+ */
+// #define DEBUG
 
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -30,19 +39,10 @@
 
 #include "psmouse.h"
 #include "alps.h"
-
 /*
  * Definitions for ALPS version 3 and 4 command mode protocol
  */
-#define ALPS_V3_X_MAX	2000
-#define ALPS_V3_Y_MAX	1400
-
-#define ALPS_BITMAP_X_BITS	15
-#define ALPS_BITMAP_Y_BITS	11
-
 #define ALPS_CMD_NIBBLE_10	0x01f2
-
-#ifdef MOD_DST
 
 #ifdef DEBUG
 static unsigned int alps_debug = 1;
@@ -51,7 +51,6 @@ static unsigned int alps_debug = 0;
 #endif
 module_param_named(alps_debug, alps_debug, uint, 0644);
 MODULE_PARM_DESC(alps_debug, "Debug config and packet info, 0=none, 1=debug, 3=deep");
-#endif
 
 static const struct alps_nibble_commands alps_v3_nibble_commands[] = {
 	{ PSMOUSE_CMD_SETPOLL,		0x00 }, /* 0 */
@@ -140,14 +139,18 @@ static const struct alps_model_info alps_model_data[] = {
 	{ { 0x73, 0x02, 0x64 },	0x8a, ALPS_PROTO_V4, 0x8f, 0x8f, 0 },
 	/* Dell Latitude E6430 */
 	{ { 0x73, 0x03, 0x0a },	0x1d, ALPS_PROTO_V5, 0x8f, 0x8f, ALPS_DUALPOINT },
-#ifdef MOD_DST
     /* Dell Inspiron N5110 */
-    /* 120920: remove ALPS_DUALPOINT flag */
     { { 0x73, 0x03, 0x50 },	0x0d, ALPS_PROTO_V6, 0xc8, 0xc8, 0 },
-    /* 120920: reported to work on Inspiron 17R 7720 */
+    /* Dell Inspiron 17R 7720 */
     { { 0x73, 0x03, 0x50 },	0x02, ALPS_PROTO_V6, 0xc8, 0xc8, 0 },
-#endif
 };
+
+/* Set these based upon protocol version */
+static int ALPS_X_MAX=0;            /* right edge */
+static int ALPS_Y_MAX=0;            /* bottom edge */
+static int ALPS_BITMAP_X_BITS=0;    /* mt number of x bits */
+static int ALPS_BITMAP_Y_BITS=0;    /* mt number of y bits */
+
 
 /*
  * XXX - this entry is suspicious. First byte has zero lower nibble,
@@ -302,21 +305,22 @@ static void alps_process_packet_v1_v2(struct psmouse *psmouse)
  * These points are returned in x1, y1, x2, and y2 when the return value
  * is greater than 0.
  */
-static int alps_process_bitmap(unsigned int x_map, unsigned int y_map,
-			       int *x1, int *y1, int *x2, int *y2)
+static int alps_process_bitmap(unsigned long int x_map, unsigned long int y_map,
+                               int *x1, int *y1, int *x2, int *y2, int proto_version)
 {
 	struct alps_bitmap_point {
 		int start_bit;
 		int num_bits;
 	};
 
-	int fingers_x = 0, fingers_y = 0, fingers;
+    int fingers_x = 0, fingers_y = 0, fingers;
 	int i, bit, prev_bit;
+
 	struct alps_bitmap_point x_low = {0,}, x_high = {0,};
 	struct alps_bitmap_point y_low = {0,}, y_high = {0,};
 	struct alps_bitmap_point *point;
 
-	if (!x_map || !y_map)
+    if (!x_map || !y_map)
 		return 0;
 
 	*x1 = *y1 = *x2 = *y2 = 0;
@@ -390,15 +394,15 @@ static int alps_process_bitmap(unsigned int x_map, unsigned int y_map,
 		}
 	}
 
-	*x1 = (ALPS_V3_X_MAX * (2 * x_low.start_bit + x_low.num_bits - 1)) /
+	*x1 = (ALPS_X_MAX * (2 * x_low.start_bit + x_low.num_bits - 1)) /
 	      (2 * (ALPS_BITMAP_X_BITS - 1));
-	*y1 = (ALPS_V3_Y_MAX * (2 * y_low.start_bit + y_low.num_bits - 1)) /
+	*y1 = (ALPS_Y_MAX * (2 * y_low.start_bit + y_low.num_bits - 1)) /
 	      (2 * (ALPS_BITMAP_Y_BITS - 1));
 
 	if (fingers > 1) {
-		*x2 = (ALPS_V3_X_MAX * (2 * x_high.start_bit + x_high.num_bits - 1)) /
+		*x2 = (ALPS_X_MAX * (2 * x_high.start_bit + x_high.num_bits - 1)) /
 		      (2 * (ALPS_BITMAP_X_BITS - 1));
-		*y2 = (ALPS_V3_Y_MAX * (2 * y_high.start_bit + y_high.num_bits - 1)) /
+		*y2 = (ALPS_Y_MAX * (2 * y_high.start_bit + y_high.num_bits - 1)) /
 		      (2 * (ALPS_BITMAP_Y_BITS - 1));
 	}
 
@@ -423,7 +427,7 @@ static void alps_report_semi_mt_data(struct input_dev *dev, int num_fingers,
 	alps_set_slot(dev, 1, num_fingers == 2, x2, y2);
 }
 
-static void alps_process_trackstick_packet_v3(struct psmouse *psmouse)
+static void alps_process_trackstick_packet_v3_v5(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
 	unsigned char *packet = psmouse->packet;
@@ -483,7 +487,7 @@ static void alps_process_trackstick_packet_v3(struct psmouse *psmouse)
 	return;
 }
 
-static void alps_process_touchpad_packet_v3(struct psmouse *psmouse)
+static void alps_process_touchpad_packet_v3_v5(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
 	unsigned char *packet = psmouse->packet;
@@ -494,6 +498,7 @@ static void alps_process_touchpad_packet_v3(struct psmouse *psmouse)
 	int x1 = 0, y1 = 0, x2 = 0, y2 = 0;
 	int fingers = 0, bmap_fingers;
 	unsigned int x_bitmap, y_bitmap;
+
     
 	/*
 	 * There's no single feature of touchpad position and bitmap packets
@@ -518,7 +523,7 @@ static void alps_process_touchpad_packet_v3(struct psmouse *psmouse)
 				   (packet[4] & 0x01);
 
 			bmap_fingers = alps_process_bitmap(x_bitmap, y_bitmap,
-							   &x1, &y1, &x2, &y2);
+			&x1, &y1, &x2, &y2, ALPS_PROTO_V3);
 
 			/*
 			 * We shouldn't report more than one finger if
@@ -614,7 +619,7 @@ static void alps_process_touchpad_packet_v3(struct psmouse *psmouse)
 	}
 }
 
-static void alps_process_packet_v3(struct psmouse *psmouse)
+static void alps_process_packet_v3_v5(struct psmouse *psmouse)
 {
 	unsigned char *packet = psmouse->packet;
 
@@ -627,11 +632,11 @@ static void alps_process_packet_v3(struct psmouse *psmouse)
 	 * of packets.
 	 */
 	if (packet[5] == 0x3f) {
-		alps_process_trackstick_packet_v3(psmouse);
+		alps_process_trackstick_packet_v3_v5(psmouse);
 		return;
 	}
 
-	alps_process_touchpad_packet_v3(psmouse);
+	alps_process_touchpad_packet_v3_v5(psmouse);
 }
 
 static void alps_process_packet_v4(struct psmouse *psmouse)
@@ -675,7 +680,7 @@ static void alps_process_packet_v4(struct psmouse *psmouse)
 			    (priv->multi_data[1] & 0x1f);
 
 		fingers = alps_process_bitmap(x_bitmap, y_bitmap,
-					      &x1, &y1, &x2, &y2);
+			&x1, &y1, &x2, &y2, ALPS_PROTO_V4);
 
 		/* Store MT data.*/
 		priv->fingers = fingers;
@@ -731,59 +736,88 @@ static void alps_process_packet_v4(struct psmouse *psmouse)
 	input_sync(dev);
 }
 
-/*
-  See file:///usr/src/linux-source-3.2.0/linux-3.2.0/Documentation/input/alps.txt
-
-         byte 0:    1    1    0    0    1    0    0    0
-         byte 1:    0   x6   x5   x4   x3   x2   x1   x0
-         byte 2:    0   y6   y5   y4   y3   y2   y1   y0
-         byte 3:    0    M    R    L    1    m    r    l
-         byte 4:   y10  y9   y8   y7  x10   x9   x8   x7
-         byte 5:    0   z6   z5   z4   z3   z2   z1   z0
-
+/* This is similar logic to alps_process_touchpad_packet_v3_v5.  The
+   bitfield positions are different.
 */
-static void alps_process_touchpad_packet_v6(struct psmouse *psmouse)
+static void alps_process_packet_v6(struct psmouse *psmouse)
 {
-    unsigned char *packet = psmouse->packet;
-    struct input_dev *dev = psmouse->dev;
-    int x, y, z;
+	struct alps_data *priv = psmouse->private;
+	unsigned char *packet = psmouse->packet;
+	struct input_dev *dev = psmouse->dev;
+	int x, y, z;
 	int left, right, middle;
+	int x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+	int fingers = 0;
+	unsigned long int x_bitmap, y_bitmap;
 
-    /* reported left:anywhere, right: upper-left corner, middle: lower-left conrner */
-    left = packet[3] & 0x01;
-	right = packet[3] & 0x02;
-	middle = packet[3] & 0x04;
+	if (priv->multi_packet)
+	{
+		if (packet[0] & 0x20) // mt pk
+		{
+			fingers = ((packet[0] & 0x6) >> 1 | (packet[0] & 0x10) >> 2);
+			x_bitmap = ((packet[2] & 0x60) >> 5) | 
+				   ((packet[4] & 0x7f) << 2) |
+				   ((packet[5] & 0x7f) << 9) |
+				   ((packet[3] & 0x07) <<16) |
+				   ((packet[3] & 0x70) <<15) |
+				   ((packet[0] & 0x01) <<22);
+			y_bitmap =  (packet[1] & 0x7f) |
+				   ((packet[2] & 0x1f) << 7);
 
-#ifndef MOD_DST
-    if (alps_debug && (packet[3] & 0x07)) 
-    {
-        psmouse_dbg(psmouse, "b: %x", packet[3]);
-    }
-#endif
+			alps_process_bitmap(x_bitmap, y_bitmap,
+			      &x1, &y1, &x2, &y2, ALPS_PROTO_V6);
 
-    x = ((packet[1] & 0x7f) | ((packet[4] & 0x0f) << 7));
-    y = ((packet[2] & 0x7f) | ((packet[4] & 0xf0) << 3));
-    z = packet[5] & 0x7f;
-    
-    /* taken from v3 protocol, not sure about validity here */
+			packet = priv->multi_data;
+		}
+		else
+		{
+			priv->multi_packet = 0;
+		}
+	}
+
+	if (packet[0] & 0x20)
+		return;
+
+	if (!priv->multi_packet && (packet[0] & 0x2)) {
+		priv->multi_packet = 1;
+		memcpy(priv->multi_data, packet, sizeof(priv->multi_data));
+		return;
+	}
+
+	priv->multi_packet = 0;
+
+	left = packet[3] & 0x1;
+	right = packet[3] & 0x2;
+	middle = packet[3] & 0x4;
+
+	x = ((packet[1] & 0x7f) | ((packet[4] & 0x0f) << 7));
+	y = ((packet[2] & 0x7f) | ((packet[4] & 0xf0) << 3));
+	z = packet[5] & 0x7f;
+	
 	if (x && y && !z)
 		return;
 
-#ifdef MOD_DST
+	if (!fingers) {
+		x1 = x;
+		y1 = y;
+		fingers = z > 0 ? 1 : 0;
+	}
+
     if ( alps_debug && z!=0 ) 
     {
-        psmouse_dbg(psmouse, "d: %x %x %x %x %x %x = %d %d %d",
-                    packet[0], packet[1], packet[2], packet[3], packet[4], packet[5],
-                    x, y, z);
+         psmouse_dbg(psmouse, "d: %x %x %x %x %x %x = %d %d %d",
+                     packet[0], packet[1], packet[2], packet[3], packet[4], packet[5],
+                     x, y, z);
     }
-#endif
 
-	if (z > 24)
+	if (z > 64)
 		input_report_key(dev, BTN_TOUCH, 1);
 	else
 		input_report_key(dev, BTN_TOUCH, 0);
 
-    alps_report_semi_mt_data(dev, z>0?1:0 , x, y, 0, 0);
+	alps_report_semi_mt_data(dev, fingers, x1, y1, x2, y2);
+
+	input_mt_report_finger_count(dev, fingers);
 
 	input_report_key(dev, BTN_LEFT, left);
 	input_report_key(dev, BTN_RIGHT, right);
@@ -794,6 +828,7 @@ static void alps_process_touchpad_packet_v6(struct psmouse *psmouse)
 		input_report_abs(dev, ABS_Y, y);
 	}
 	input_report_abs(dev, ABS_PRESSURE, z);
+    
 
 	input_sync(dev);
 }
@@ -806,22 +841,14 @@ static void alps_process_packet(struct psmouse *psmouse)
 	switch (model->proto_version) {
 	case ALPS_PROTO_V1:
 	case ALPS_PROTO_V2:
-		alps_process_packet_v1_v2(psmouse);
-		break;
+		alps_process_packet_v1_v2(psmouse); break;
 	case ALPS_PROTO_V3:
-		alps_process_packet_v3(psmouse);
-		break;
-	case ALPS_PROTO_V4:
-		alps_process_packet_v4(psmouse);
-		break;
 	case ALPS_PROTO_V5:
-        alps_process_packet_v3(psmouse);
-        break;
-#ifdef MOD_DST
-    case ALPS_PROTO_V6:
-        alps_process_touchpad_packet_v6(psmouse);
-		break;
-#endif
+		alps_process_packet_v3_v5(psmouse); break;
+	case ALPS_PROTO_V4:
+		alps_process_packet_v4(psmouse); break;
+    	case ALPS_PROTO_V6:
+        	alps_process_packet_v6(psmouse); break;
 	}
 }
 
@@ -963,20 +990,6 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
 	struct alps_data *priv = psmouse->private;
 	const struct alps_model_info *model = priv->i;
 
-#ifdef MOD_DST
-    /* 120920:DST Extreme Hack to discard unsupported mt packets on the
-       Dell N5110.  I have not had time to figure out the mt structure
-    */
-    if (model->proto_version == ALPS_PROTO_V6 && psmouse->packet[0] != 0xc8)
-    {
-        if (alps_debug)
-            psmouse_dbg(psmouse, "v6 mt %x, resetting", psmouse->packet[0]);
-        psmouse->packet[0] = 0;
-        psmouse->pktcnt = 0;
-        return PSMOUSE_GOOD_DATA;
-    }
-#endif
-
     if ((psmouse->packet[0] & 0xc8) == 0x08) { /* PS/2 packet */
 		if (psmouse->pktcnt == 3) {
 			alps_report_bare_ps2_packet(psmouse, psmouse->packet,
@@ -993,7 +1006,7 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
 		return alps_handle_interleaved_ps2(psmouse);
 	}
 
-#ifdef MOD_DST
+    /* deep debug to dump raw packets.  Why the switch? Easy code. */
     if ( alps_debug & 2 )
     {
         unsigned char* pkt = psmouse->packet;
@@ -1023,7 +1036,6 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
                 break;
         }
     }
-#endif
 
     if (!alps_is_valid_first_byte(model, psmouse->packet[0])) {
 		psmouse_dbg(psmouse,
@@ -1033,14 +1045,14 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
 	}
 
 	/* Bytes 2 - pktsize should have 0 in the highest bit */
-	if (psmouse->pktcnt >= 2 && psmouse->pktcnt <= psmouse->pktsize &&
+/*	if (psmouse->pktcnt >= 2 && psmouse->pktcnt <= psmouse->pktsize &&
 	    (psmouse->packet[psmouse->pktcnt - 1] & 0x80)) {
 		psmouse_dbg(psmouse, "refusing packet[%i] = %x\n",
 			    psmouse->pktcnt - 1,
 			    psmouse->packet[psmouse->pktcnt - 1]);
 		return PSMOUSE_BAD_DATA;
 	}
-
+*/
 	if (psmouse->pktcnt == psmouse->pktsize) {
 		alps_process_packet(psmouse);
 		return PSMOUSE_FULL_PACKET;
@@ -1075,11 +1087,6 @@ static int alps_command_mode_set_addr(struct psmouse *psmouse, int addr)
 	struct alps_data *priv = psmouse->private;
 	int i, nibble;
 
-#ifdef MOD_DST
-    if (alps_debug)
-        psmouse_dbg(psmouse, "Addr %x\n", priv->addr_command);
-#endif
-    
 	if (ps2_command(ps2dev, NULL, priv->addr_command))
 		return -9;
 
@@ -1151,7 +1158,6 @@ static int alps_enter_command_mode(struct psmouse *psmouse,
 		return -1;
 	}
 
-#ifdef MOD_DST
     if (alps_debug) 
         psmouse_dbg(psmouse, "alps_enter_command_mode: %2.2x %2.2x %2.2x",
                     param[0], param[1], param[2]);
@@ -1159,10 +1165,8 @@ static int alps_enter_command_mode(struct psmouse *psmouse,
     /* Warning - cannot use the model yet because some devices have same E7 response
        but are differentiated by the command mode response
     */
-    if ((param[0] != 0x88 && param[1] != 0x07)          /* For V1, V2, V3, V4 */
-#ifdef MOD_DST
-        && ((param[0] != 0x73 && param[1] != 0x01))    /* For V6 */
-#endif
+    if ((param[0] != 0x88 && param[1] != 0x07)          /* For V1, V2, V3, V4, V5 */
+        && ((param[0] != 0x73 && param[1] != 0x01))     /* For V6 */
         )
     {
         psmouse_dbg(psmouse,
@@ -1170,14 +1174,6 @@ static int alps_enter_command_mode(struct psmouse *psmouse,
                     param[0], param[1], param[2]);
         return -1;
     }
-#else
-    if (param[0] != 0x88 && param[1] != 0x07) {
-		psmouse_dbg(psmouse,
-			    "unknown response while entering command mode: %2.2x %2.2x %2.2x\n",
-			    param[0], param[1], param[2]);
-		return -1;
-	}
-#endif
     
 	if (resp)
 		*resp = param[2];
@@ -1277,10 +1273,8 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 				psmouse_info(psmouse,
 					    "Unknown command mode response %2.2x\n",
 					    param[0]);
-#ifdef MOD_DST
             else
-                psmouse_info(psmouse, "ver=%d, rsp=%2.2x\n", model->proto_version, param[0]);
-#endif
+                psmouse_dbg(psmouse, "protocol ver=%d, command_mode rsp=%2.2x\n", model->proto_version, param[0]);
 		}
 	}
 
@@ -1709,12 +1703,12 @@ error:
 
 static int alps_hw_init_v5(struct psmouse *psmouse)
 {
-    struct alps_data *priv = psmouse->private;
+	struct alps_data *priv = psmouse->private;
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
 	unsigned char param[4];
 	unsigned int i=0;
 
-    priv->nibble_commands = alps_v3_nibble_commands;
+    	priv->nibble_commands = alps_v3_nibble_commands;
 	priv->addr_command = PSMOUSE_CMD_RESET_WRAP;
 
 #define DO_CMD(cmd) i++; \
@@ -1856,24 +1850,16 @@ static int alps_hw_init_v5(struct psmouse *psmouse)
 	return 0;
 }
 
-#ifdef MOD_DST
-/* Captured from qemu using vista as guest os, using forshee qemu patch at
-   http://swapspace.forshee.me/2011/11/touchpad-protocol-reverse-engineering.html
-
-   In order to load the Dell/Alps vista driver, the bios DSDT had to be modified to
-   recognize the alps touchpad.  For the qemu DSDT patch see:
-   http://www.spinics.net/lists/linux-input/msg21948.html
-   For PS2M, I used _HID("DLL04B0") based on the acpidump from my IR15
-   
-*/
 static int alps_hw_init_v6(struct psmouse *psmouse)
 {
     struct alps_data *priv = psmouse->private;
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
-	unsigned char param[4];
+    struct ps2dev *ps2dev = &psmouse->ps2dev;
+    unsigned char param[4];
 
+    /* Doesn't seem to be necessary but we keep here in case
+       registers need to be used */
     priv->nibble_commands = alps_v3_nibble_commands;
-	priv->addr_command = PSMOUSE_CMD_RESET_WRAP;
+    priv->addr_command = PSMOUSE_CMD_RESET_WRAP;
     
     ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
     if (param[0] != PSMOUSE_RET_BAT && param[1] != PSMOUSE_RET_ID) 
@@ -1950,32 +1936,10 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
     if (alps_debug)
         psmouse_dbg(psmouse, "73 03 50: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
 
-    // Enter command mode
+    /* Enter command mode */
     alps_enter_command_mode(psmouse, param);
 
-#if 0
-    {
-        int reg_val;
-
-        // Added for testing - nothin' worth looking at
-        reg_val = alps_command_mode_read_reg(psmouse, 0x0004);
-        psmouse_dbg(psmouse, "reg %x=%2.2x", 0x0004, reg_val);
-        reg_val = alps_command_mode_read_reg(psmouse, 0x0006);
-        psmouse_dbg(psmouse, "reg %x=%2.2x", 0x0006, reg_val);
-        reg_val = alps_command_mode_read_reg(psmouse, 0x0007);
-        psmouse_dbg(psmouse, "reg %x=0%2.2x", 0x0007, reg_val);
-        reg_val = alps_command_mode_read_reg(psmouse, 0x0144);
-        psmouse_dbg(psmouse, "reg %x=0%2.2x", 0x0144, reg_val);
-        reg_val = alps_command_mode_read_reg(psmouse, 0x0159);
-        psmouse_dbg(psmouse, "reg %x=0%2.2x", 0x0159, reg_val);
-        reg_val = alps_command_mode_read_reg(psmouse, 0x0162);
-        psmouse_dbg(psmouse, "reg %x=0%2.2x", 0x0162, reg_val);
-        reg_val = alps_command_mode_read_reg(psmouse, 0x0163);
-        psmouse_dbg(psmouse, "reg %x=0%2.2x", 0x0163, reg_val);
-    }
-#endif
-
-    // exit command mode
+    /* exit command mode */
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
 
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
@@ -1997,7 +1961,7 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
     ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
     ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE);
 
-    // Enter command mode
+    /* Enter command mode */
     alps_enter_command_mode(psmouse, param);
 
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
@@ -2051,7 +2015,6 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
 
     return 0;
 }
-#endif
 
 static int alps_hw_init(struct psmouse *psmouse)
 {
@@ -2062,22 +2025,15 @@ static int alps_hw_init(struct psmouse *psmouse)
 	switch (model->proto_version) {
 	case ALPS_PROTO_V1:
 	case ALPS_PROTO_V2:
-		ret = alps_hw_init_v1_v2(psmouse);
-		break;
+		ret = alps_hw_init_v1_v2(psmouse); break;
 	case ALPS_PROTO_V3:
-		ret = alps_hw_init_v3(psmouse);
-		break;
+		ret = alps_hw_init_v3(psmouse); break;
 	case ALPS_PROTO_V4:
-		ret = alps_hw_init_v4(psmouse);
-		break;
+		ret = alps_hw_init_v4(psmouse); break;
 	case ALPS_PROTO_V5:
-		ret = alps_hw_init_v5(psmouse);
-		break;
-#ifdef MOD_DST
-    case ALPS_PROTO_V6:
-        ret = alps_hw_init_v6(psmouse);
-        break;
-#endif
+		ret = alps_hw_init_v5(psmouse); break;
+	case ALPS_PROTO_V6:
+	        ret = alps_hw_init_v6(psmouse); break;
 	}
 
 	return ret;
@@ -2159,50 +2115,50 @@ int alps_init(struct psmouse *psmouse)
 		input_set_abs_params(dev1, ABS_X, 0, 1023, 0, 0);
 		input_set_abs_params(dev1, ABS_Y, 0, 767, 0, 0);
 		break;
+
 	case ALPS_PROTO_V3:
 	case ALPS_PROTO_V4:
 	case ALPS_PROTO_V5:
 		set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
-            
+
 		input_mt_init_slots(dev1, 2);
 
-		input_set_abs_params(dev1, ABS_MT_POSITION_X, 0, ALPS_V3_X_MAX, 0, 0);
-		input_set_abs_params(dev1, ABS_MT_POSITION_Y, 0, ALPS_V3_Y_MAX, 0, 0);
+        ALPS_BITMAP_X_BITS = 15;
+        ALPS_BITMAP_Y_BITS = 11;
+        ALPS_X_MAX = 2000;
+        ALPS_Y_MAX = 1400;
+
+		input_set_abs_params(dev1, ABS_MT_POSITION_X, 0, ALPS_X_MAX, 0, 0);
+		input_set_abs_params(dev1, ABS_MT_POSITION_Y, 0, ALPS_Y_MAX, 0, 0);
         
 		set_bit(BTN_TOOL_DOUBLETAP, dev1->keybit);
 		set_bit(BTN_TOOL_TRIPLETAP, dev1->keybit);
 		set_bit(BTN_TOOL_QUADTAP, dev1->keybit);
 
-		input_set_abs_params(dev1, ABS_X, 0, ALPS_V3_X_MAX, 0, 0);
-		input_set_abs_params(dev1, ABS_Y, 0, ALPS_V3_Y_MAX, 0, 0);
+		input_set_abs_params(dev1, ABS_X, 0, ALPS_X_MAX, 0, 0);
+		input_set_abs_params(dev1, ABS_Y, 0, ALPS_Y_MAX, 0, 0);
 		break;
-#ifdef MOD_DST
-    case ALPS_PROTO_V6:
-        /* See linux-3.2.0/include/linux/input.h
-               linux-3.2.0/include/linux/input/mt.h
-               linux-3.2.0/include/linux/input/input-mt.c
-         */
 
-        set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
+	case ALPS_PROTO_V6:
+		set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
 
-        input_mt_init_slots(dev1, 2);
-        input_set_abs_params(dev1, ABS_MT_POSITION_X, 0, 1360, 0, 0);
-        input_set_abs_params(dev1, ABS_MT_POSITION_Y, 0, 660, 0, 0);
+        ALPS_BITMAP_X_BITS = 23;
+        ALPS_BITMAP_Y_BITS = 12;
+        ALPS_X_MAX = 1360;
+        ALPS_Y_MAX =  660;
+
+		input_mt_init_slots(dev1, 2);
+		input_set_abs_params(dev1, ABS_MT_POSITION_X, 0, ALPS_X_MAX, 0, 0);
+		input_set_abs_params(dev1, ABS_MT_POSITION_Y, 0, ALPS_Y_MAX, 0, 0);
 
 		set_bit(BTN_TOOL_DOUBLETAP, dev1->keybit);
 		set_bit(BTN_TOOL_TRIPLETAP, dev1->keybit);
 		set_bit(BTN_TOOL_QUADTAP, dev1->keybit);
 
-        /* Edge-scrolling: vert works with this value, possibly other values */
-        input_set_abs_params(dev1, ABS_X, 0, 1360, 0, 0);
-        /* Edge-scrolling: horiz works with this value, possibly other values */
-		input_set_abs_params(dev1, ABS_Y, 0, 660, 0, 0);
-
-        if (alps_debug)
-            psmouse_dbg(psmouse, "alps_init: keybit=%lX", *dev1->keybit);
+		input_set_abs_params(dev1, ABS_X, 0, ALPS_X_MAX, 0, 0);
+		input_set_abs_params(dev1, ABS_Y, 0, ALPS_Y_MAX, 0, 0);
 
 		break;
-#endif
 	}
 
 	input_set_abs_params(dev1, ABS_PRESSURE, 0, 127, 0, 0);
@@ -2252,9 +2208,6 @@ int alps_init(struct psmouse *psmouse)
 	/* We are having trouble resyncing ALPS touchpads so disable it for now */
 	psmouse->resync_time = 0;
 
-#ifdef MOD_DST
-    psmouse_dbg(psmouse, "alps_init: success\n");
-#endif    
 	return 0;
 
 init_fail:
@@ -2262,9 +2215,6 @@ init_fail:
 	input_free_device(dev2);
 	kfree(priv);
 	psmouse->private = NULL;
-#ifdef MOD_DST
-    psmouse_err(psmouse, "alps_init: FAIL\n");
-#endif
 	return -1;
 }
 
@@ -2285,4 +2235,3 @@ int alps_detect(struct psmouse *psmouse, bool set_properties)
 	}
 	return 0;
 }
-
