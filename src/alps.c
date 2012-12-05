@@ -18,7 +18,7 @@
 /* Indicator for my changes */
 #define MOD_DST
 
-/* enable psmouse_dbg, disable to reduce code size */
+/* enable psmouse_dbg, comment out to reduce code size */
 #define DEBUG
 
 #include <linux/module.h>
@@ -43,9 +43,14 @@
 #define ALPS_CMD_NIBBLE_10	0x01f2
 
 #ifdef MOD_DST
+
+#ifdef DEBUG
 static unsigned int alps_debug = 1;
-module_param_named(alps_debug, alps_debug, bool, 0644);
-MODULE_PARM_DESC(alps_debug, "Debug config and packet info, 0 = disable (default), 1 = enabled");
+#else
+static unsigned int alps_debug = 0;
+#endif
+module_param_named(alps_debug, alps_debug, uint, 0644);
+MODULE_PARM_DESC(alps_debug, "Debug config and packet info, 0=none, 1=debug, 3=deep");
 #endif
 
 static const struct alps_nibble_commands alps_v3_nibble_commands[] = {
@@ -137,7 +142,10 @@ static const struct alps_model_info alps_model_data[] = {
 	{ { 0x73, 0x03, 0x0a },	0x1d, ALPS_PROTO_V5, 0x8f, 0x8f, ALPS_DUALPOINT },
 #ifdef MOD_DST
     /* Dell Inspiron N5110 */
-    { { 0x73, 0x03, 0x50 },	0x0d, ALPS_PROTO_V6, 0xc8, 0xc8, ALPS_DUALPOINT },
+    /* 120920: remove ALPS_DUALPOINT flag */
+    { { 0x73, 0x03, 0x50 },	0x0d, ALPS_PROTO_V6, 0xc8, 0xc8, 0 },
+    /* 120920: reported to work on Inspiron 17R 7720 */
+    { { 0x73, 0x03, 0x50 },	0x02, ALPS_PROTO_V6, 0xc8, 0xc8, 0 },
 #endif
 };
 
@@ -733,9 +741,6 @@ static void alps_process_packet_v4(struct psmouse *psmouse)
          byte 4:   y10  y9   y8   y7  x10   x9   x8   x7
          byte 5:    0   z6   z5   z4   z3   z2   z1   z0
 
-  Cursor speed can be changed using xinput:
-
-    xinput set-prop <devid> 257 40
 */
 static void alps_process_touchpad_packet_v6(struct psmouse *psmouse)
 {
@@ -744,10 +749,17 @@ static void alps_process_touchpad_packet_v6(struct psmouse *psmouse)
     int x, y, z;
 	int left, right, middle;
 
-    /* need to check this.  Single tap works when enabled in touchpad settings */
+    /* reported left:anywhere, right: upper-left corner, middle: lower-left conrner */
     left = packet[3] & 0x01;
 	right = packet[3] & 0x02;
 	middle = packet[3] & 0x04;
+
+#ifndef MOD_DST
+    if (alps_debug && (packet[3] & 0x07)) 
+    {
+        psmouse_dbg(psmouse, "b: %x", packet[3]);
+    }
+#endif
 
     x = ((packet[1] & 0x7f) | ((packet[4] & 0x0f) << 7));
     y = ((packet[2] & 0x7f) | ((packet[4] & 0xf0) << 3));
@@ -951,6 +963,20 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
 	struct alps_data *priv = psmouse->private;
 	const struct alps_model_info *model = priv->i;
 
+#ifdef MOD_DST
+    /* 120920:DST Extreme Hack to discard unsupported mt packets on the
+       Dell N5110.  I have not had time to figure out the mt structure
+    */
+    if (model->proto_version == ALPS_PROTO_V6 && psmouse->packet[0] != 0xc8)
+    {
+        if (alps_debug)
+            psmouse_dbg(psmouse, "v6 mt %x, resetting", psmouse->packet[0]);
+        psmouse->packet[0] = 0;
+        psmouse->pktcnt = 0;
+        return PSMOUSE_GOOD_DATA;
+    }
+#endif
+
     if ((psmouse->packet[0] & 0xc8) == 0x08) { /* PS/2 packet */
 		if (psmouse->pktcnt == 3) {
 			alps_report_bare_ps2_packet(psmouse, psmouse->packet,
@@ -967,7 +993,39 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
 		return alps_handle_interleaved_ps2(psmouse);
 	}
 
-	if (!alps_is_valid_first_byte(model, psmouse->packet[0])) {
+#ifdef MOD_DST
+    if ( alps_debug & 2 )
+    {
+        unsigned char* pkt = psmouse->packet;
+        
+        switch(psmouse->pktcnt)
+        {
+            case 1: 
+                psmouse_dbg(psmouse, "1: %x", pkt[0]);
+                break;
+            case 2:
+                psmouse_dbg(psmouse, "2: %x %x", pkt[0], pkt[1]);
+                break;
+            case 3:
+                psmouse_dbg(psmouse, "3: %x %x %x", pkt[0], pkt[1], pkt[2]);
+                break;
+            case 4:
+                psmouse_dbg(psmouse, "4: %x %x %x %x", pkt[0], pkt[1], pkt[2], pkt[3]);
+                break;
+            case 5:
+                psmouse_dbg(psmouse, "5: %x %x %x %x %x", pkt[0], pkt[1], pkt[2], pkt[3], pkt[4]);
+                break;
+            case 6:
+                psmouse_dbg(psmouse, "6: %x %x %x %x %x %x", pkt[0], pkt[1], pkt[2], pkt[3], pkt[4], pkt[5]);
+                break;
+            default:
+                psmouse_dbg(psmouse, "U: %d", psmouse->pktcnt);
+                break;
+        }
+    }
+#endif
+
+    if (!alps_is_valid_first_byte(model, psmouse->packet[0])) {
 		psmouse_dbg(psmouse,
 			    "refusing packet[0] = %x (mask0 = %x, byte0 = %x)\n",
 			    psmouse->packet[0], model->mask0, model->byte0);
@@ -1101,8 +1159,10 @@ static int alps_enter_command_mode(struct psmouse *psmouse,
     /* Warning - cannot use the model yet because some devices have same E7 response
        but are differentiated by the command mode response
     */
-    if ((param[0] != 0x88 && param[1] != 0x07) &&     /* For V1, V2, V3, V4 */
-        ((param[0] != 0x73 && param[1] != 0x01))       /* For V6 */
+    if ((param[0] != 0x88 && param[1] != 0x07)          /* For V1, V2, V3, V4 */
+#ifdef MOD_DST
+        && ((param[0] != 0x73 && param[1] != 0x01))    /* For V6 */
+#endif
         )
     {
         psmouse_dbg(psmouse,
@@ -1157,7 +1217,7 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
 		return NULL;
 
-	psmouse_info(psmouse, "E6 report: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
+	psmouse_dbg(psmouse, "E6 report: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
 
 	if ((param[0] & 0xf8) != 0 || param[1] != 0 ||
 	    (param[2] != 10 && param[2] != 100))
@@ -1178,7 +1238,7 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
 		return NULL;
 
-	psmouse_info(psmouse, "E7 report: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
+	psmouse_dbg(psmouse, "E7 report: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
 
 	if (version) {
 		for (i = 0; i < ARRAY_SIZE(rates) && param[2] != rates[i]; i++)
@@ -1213,14 +1273,14 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 			}
 			alps_exit_command_mode(psmouse);
 
-#ifdef MOD_DST
-            psmouse_info(psmouse, "ver=%d, rsp=%2.2x\n", model->proto_version, param[0]);
-#endif
-            
 			if (!model)
-				psmouse_dbg(psmouse,
+				psmouse_info(psmouse,
 					    "Unknown command mode response %2.2x\n",
 					    param[0]);
+#ifdef MOD_DST
+            else
+                psmouse_info(psmouse, "ver=%d, rsp=%2.2x\n", model->proto_version, param[0]);
+#endif
 		}
 	}
 
@@ -1811,10 +1871,10 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
     struct alps_data *priv = psmouse->private;
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
 	unsigned char param[4];
-    int reg_val;
 
     priv->nibble_commands = alps_v3_nibble_commands;
 	priv->addr_command = PSMOUSE_CMD_RESET_WRAP;
+    
     ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
     if (param[0] != PSMOUSE_RET_BAT && param[1] != PSMOUSE_RET_ID) 
     {
@@ -1828,7 +1888,8 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
     }
 
     ps2_command(ps2dev, param, PSMOUSE_CMD_GETID);
-    psmouse_dbg(psmouse, "ID 0: %2.2x", param[0]);
+    if (alps_debug)
+        psmouse_dbg(psmouse, "ID 0: %2.2x", param[0]);
 
     /* E6 report */
     param[0] = 0;
@@ -1837,7 +1898,8 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
     ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-    psmouse_dbg(psmouse, "00 00 64: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
+    if (alps_debug)
+        psmouse_dbg(psmouse, "00 00 64: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
     
     /* ?? */
     param[0] = 0x03;
@@ -1852,7 +1914,8 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
 	    ps2_command(ps2dev, &param[2], PSMOUSE_CMD_SETRATE) ||
 	    ps2_command(ps2dev, param, PSMOUSE_CMD_GETID))
 		return -1;
-    psmouse_dbg(psmouse, "ID 0: %2.2x", param[0]);
+    if (alps_debug)
+        psmouse_dbg(psmouse, "ID 0: %2.2x", param[0]);
 
     /* Set rate and enable data reporting? */
     param[0]=0xc8;
@@ -1862,7 +1925,8 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
     ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE);
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_GETID);
 
-    psmouse_dbg(psmouse, "2-ID 0: %2.2x", param[0]);
+    if (alps_debug)
+        psmouse_dbg(psmouse, "2-ID 0: %2.2x", param[0]);
 
     param[0]=0x64;
     param[1]=0x03;
@@ -1883,14 +1947,33 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
     ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-    psmouse_dbg(psmouse, "73 03 50: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
+    if (alps_debug)
+        psmouse_dbg(psmouse, "73 03 50: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
 
     // Enter command mode
     alps_enter_command_mode(psmouse, param);
 
-    // check for trackstick
-    reg_val = alps_command_mode_read_reg(psmouse, 0x0008);
-    psmouse_dbg(psmouse, "0x0008=0%x", reg_val);
+#if 0
+    {
+        int reg_val;
+
+        // Added for testing - nothin' worth looking at
+        reg_val = alps_command_mode_read_reg(psmouse, 0x0004);
+        psmouse_dbg(psmouse, "reg %x=%2.2x", 0x0004, reg_val);
+        reg_val = alps_command_mode_read_reg(psmouse, 0x0006);
+        psmouse_dbg(psmouse, "reg %x=%2.2x", 0x0006, reg_val);
+        reg_val = alps_command_mode_read_reg(psmouse, 0x0007);
+        psmouse_dbg(psmouse, "reg %x=0%2.2x", 0x0007, reg_val);
+        reg_val = alps_command_mode_read_reg(psmouse, 0x0144);
+        psmouse_dbg(psmouse, "reg %x=0%2.2x", 0x0144, reg_val);
+        reg_val = alps_command_mode_read_reg(psmouse, 0x0159);
+        psmouse_dbg(psmouse, "reg %x=0%2.2x", 0x0159, reg_val);
+        reg_val = alps_command_mode_read_reg(psmouse, 0x0162);
+        psmouse_dbg(psmouse, "reg %x=0%2.2x", 0x0162, reg_val);
+        reg_val = alps_command_mode_read_reg(psmouse, 0x0163);
+        psmouse_dbg(psmouse, "reg %x=0%2.2x", 0x0163, reg_val);
+    }
+#endif
 
     // exit command mode
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
@@ -1898,12 +1981,14 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
     ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-    psmouse_dbg(psmouse, "Match bf 1a 04: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
+    if (alps_debug)
+        psmouse_dbg(psmouse, "Match bf 1a 04: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
 
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
     ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-    psmouse_dbg(psmouse, "Match 89 95 84: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
+    if (alps_debug)
+        psmouse_dbg(psmouse, "Match 89 95 84: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
 
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
@@ -2093,9 +2178,13 @@ int alps_init(struct psmouse *psmouse)
 		break;
 #ifdef MOD_DST
     case ALPS_PROTO_V6:
+        /* See linux-3.2.0/include/linux/input.h
+               linux-3.2.0/include/linux/input/mt.h
+               linux-3.2.0/include/linux/input/input-mt.c
+         */
+
         set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
 
-        /* cut-and-paste, need to investigate more */
         input_mt_init_slots(dev1, 2);
         input_set_abs_params(dev1, ABS_MT_POSITION_X, 0, 1360, 0, 0);
         input_set_abs_params(dev1, ABS_MT_POSITION_Y, 0, 660, 0, 0);
@@ -2110,7 +2199,7 @@ int alps_init(struct psmouse *psmouse)
 		input_set_abs_params(dev1, ABS_Y, 0, 660, 0, 0);
 
         if (alps_debug)
-            psmouse_dbg(psmouse, "alps_init: keybit=%X", dev1->keybit);
+            psmouse_dbg(psmouse, "alps_init: keybit=%lX", *dev1->keybit);
 
 		break;
 #endif
