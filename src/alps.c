@@ -1028,9 +1028,11 @@ static int alps_command_mode_send_nibble(struct psmouse *psmouse, int nibble)
 	return 0;
 }
 
-static int alps_command_mode_put_configword(struct psmouse *psmouse, uint16_t word)
+#if 0
+/* For the moment we have nothing which says that config words are
+ * 16-byte oriented. */
+static int alps_command_mode_put_configword(struct psmouse *psmouse, int word)
 {
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
 	int i, nibble;
 
 	for (i = 12; i >= 0; i -= 4) {
@@ -1041,6 +1043,7 @@ static int alps_command_mode_put_configword(struct psmouse *psmouse, uint16_t wo
 
 	return 0;
 }
+#endif
 
 static int alps_command_mode_set_addr(struct psmouse *psmouse, int addr)
 {
@@ -1103,6 +1106,34 @@ static int alps_command_mode_write_reg(struct psmouse *psmouse, int addr,
 	return __alps_command_mode_write_reg(psmouse, value);
 }
 
+
+/* Check that the register has the expected value. Return -1 on error, 0
+ * on mismatch, 1 on match. */
+static int alps_command_mode_check_reg(struct psmouse * psmouse, int addr, u8 value)
+{
+        int reg_val = alps_command_mode_read_reg(psmouse, addr);
+        if (reg_val < 0) return -1;
+        if (reg_val != value) {
+                psmouse_info(psmouse, "register %04x: got value %2.2x, differs from expected %2.2x", addr, reg_val, value);
+        }
+        return reg_val == value;
+}
+
+
+/* Set the register to the given value, but return its contents first.
+ * Return -1 on error, and the previous register value otherwise */
+static int alps_command_mode_checkset_reg(struct psmouse * psmouse, int addr, u8 value)
+{
+        int reg_val = alps_command_mode_read_reg(psmouse, addr);
+        if (reg_val < 0) return -1;
+        psmouse_info(psmouse, "register %04x: previous value %2.2x, now setting %2.2x", addr, reg_val, value);
+        if (__alps_command_mode_write_reg(psmouse, value)) {
+                psmouse_info(psmouse, "register %04x: error setting value %2.2x", addr, value);
+                return -1;
+        }
+        return 0;
+}
+
 static int alps_enter_command_mode(struct psmouse *psmouse,
 				   unsigned char *resp)
 {
@@ -1117,6 +1148,9 @@ static int alps_enter_command_mode(struct psmouse *psmouse,
 		return -1;
 	}
 
+        psmouse_dbg(psmouse,
+                    "command mode response: %2.2x %2.2x %2.2x\n",
+                    param[0], param[1], param[2]);
 	/* Warning - cannot determine model yet because some devices have same
 	   E7 response but are differentiated by the command mode response
 	*/
@@ -1136,10 +1170,59 @@ static int alps_enter_command_mode(struct psmouse *psmouse,
 
 static inline int alps_exit_command_mode(struct psmouse *psmouse)
 {
+        struct ps2dev *ps2dev = &psmouse->ps2dev;
+        if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM))
+                return -1;
+        return 0;
+}
+
+static int alps_get_e6_report(struct psmouse *psmouse, unsigned char param[])
+{
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
-	if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM))
-		return -1;
-	return 0;
+        /* FIXME. Is the setres(0) really important ? Unclear. */
+        param[0] = 0;
+        if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES) ||
+            ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
+            ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
+            ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11))
+        {
+                psmouse_info(psmouse, "E6 report: failed");
+                return -1;
+        }
+        param[0] = param[1] = param[2] = 0xff;
+
+        if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO)) {
+                psmouse_info(psmouse, "E6 report: failed");
+        } else {
+                psmouse_info(psmouse, "E6 report: %2.2x %2.2x %2.2x",
+                                param[0], param[1], param[2]);
+        }
+        return 0;
+}
+
+static int alps_get_e7_report(struct psmouse *psmouse, unsigned char param[])
+{
+	struct ps2dev *ps2dev = &psmouse->ps2dev;
+        /* FIXME. Some call locations have a setres(0) here interpreted
+         * as being part of the command. Judging by traces from the
+         * windows driver, it is unclear.
+         */
+        if (ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE21) ||
+            ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE21) ||
+            ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE21))
+        {
+                psmouse_info(psmouse, "E7 report: failed");
+                return -1;
+        }
+        param[0] = param[1] = param[2] = 0xff;
+
+        if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO)) {
+                psmouse_info(psmouse, "E7 report: failed");
+        } else {
+                psmouse_info(psmouse, "E7 report: %2.2x %2.2x %2.2x",
+                                param[0], param[1], param[2]);
+        }
+        return 0;
 }
 
 static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int *version)
@@ -1156,19 +1239,7 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 	 * The bits 0-2 of the first byte will be 1s if some buttons are
 	 * pressed.
 	 */
-	param[0] = 0;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11))
-		return NULL;
-
-	param[0] = param[1] = param[2] = 0xff;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
-		return NULL;
-
-	psmouse_info(psmouse, "E6 report: %2.2x %2.2x %2.2x",
-		     param[0], param[1], param[2]);
+        alps_get_e6_report(psmouse, param);
 
 	if ((param[0] & 0xf8) != 0 || param[1] != 0 ||
 	    (param[2] != 10 && param[2] != 100))
@@ -1178,19 +1249,14 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 	 * Now try "E7 report". Allowed responses are in
 	 * alps_model_data[].signature
 	 */
+        /* I presume that the SETRES call here is useless. However, I do
+         * not want to change the functionality of existing code, so I'm
+         * keeping it. After all, it's perhaps innocuous.
+         */
 	param[0] = 0;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE21) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE21) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE21))
-		return NULL;
-
-	param[0] = param[1] = param[2] = 0xff;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
-		return NULL;
-
-	psmouse_info(psmouse, "E7 report: %2.2x %2.2x %2.2x",
-		     param[0], param[1], param[2]);
+	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES))
+            return NULL;
+        alps_get_e7_report(psmouse, param);
 
 	if (version) {
 		for (i = 0; i < ARRAY_SIZE(rates) && param[2] != rates[i]; i++)
@@ -1433,10 +1499,50 @@ static int alps_absolute_mode_v3(struct psmouse *psmouse)
 	return 0;
 }
 
+static int alps_e6_sort_of_setmode(struct psmouse * psmouse, u8 byte)
+{
+	struct ps2dev *ps2dev = &psmouse->ps2dev;
+        /*
+         * Not sure what this does, but it is absolutely essential.
+         * Without it, the touchpad does not work at all and the
+         * trackstick just emits normal PS/2 packets.
+         * 
+         * We conjecture that various bytes could be sent, but we've seen
+         * only 0x94 so far. Not clear it's related to the nibble array
+         * in any way, in fact.
+         *
+         * The relationship with E6 lies in the SETSCALE11^3 sequence.
+         */
+        if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
+            ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
+            ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
+            alps_command_mode_send_nibble(psmouse, (byte>>4)) ||
+            alps_command_mode_send_nibble(psmouse, byte & 0xf))
+        {
+                psmouse_err(psmouse, "Error sending magic E6 sequence %2.2x\n",  byte);
+                return -1;
+        }
+        return 0;
+}
+
+static int alps_set_rate_and_enable(struct psmouse * psmouse, u8 rate)
+{
+    /* Set rate and enable data reporting */
+        struct ps2dev *ps2dev = &psmouse->ps2dev;
+        unsigned char param[4];
+        param[0] = 0x64;
+        if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE) ||
+            ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE))
+        {
+		psmouse_err(psmouse, "Failed to enable data reporting\n");
+                return -1;
+        }
+        return 0;
+}
+
 static int alps_hw_init_v3(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
 	int reg_val;
 	unsigned char param[4];
 
@@ -1465,32 +1571,15 @@ static int alps_hw_init_v3(struct psmouse *psmouse)
 		 * with the assumption that there isn't a trackstick after
 		 * all.
 		 */
-		param[0] = 0x64;
-		if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21) ||
-		    ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21) ||
-		    ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21) ||
-		    ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO)) {
+		param[0] = 0x64;        /* ??? Completely useless */
+                if (alps_get_e7_report(psmouse, param)) {
 			psmouse_warn(psmouse, "trackstick E7 report failed\n");
 		} else {
 			psmouse_dbg(psmouse,
 				    "trackstick E7 report: %2.2x %2.2x %2.2x\n",
 				    param[0], param[1], param[2]);
 
-			/*
-			 * Not sure what this does, but it is absolutely
-			 * essential. Without it, the touchpad does not
-			 * work at all and the trackstick just emits normal
-			 * PS/2 packets.
-			 */
-			if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
-			    ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
-			    ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11) ||
-			    alps_command_mode_send_nibble(psmouse, 0x9) ||
-			    alps_command_mode_send_nibble(psmouse, 0x4)) {
-				psmouse_err(psmouse,
-					    "Error sending magic E6 sequence\n");
-				goto error_passthrough;
-			}
+                        alps_e6_sort_of_setmode(psmouse, 0x94);
 		}
 
 		if (alps_enter_command_mode(psmouse, NULL))
@@ -1546,10 +1635,7 @@ static int alps_hw_init_v3(struct psmouse *psmouse)
 
 	alps_exit_command_mode(psmouse);
 
-	/* Set rate and enable data reporting */
-	param[0] = 0x64;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE)) {
+	if (alps_set_rate_and_enable(psmouse, 0x64)) {
 		psmouse_err(psmouse, "Failed to enable data reporting\n");
 		return -1;
 	}
@@ -1589,8 +1675,6 @@ static int alps_absolute_mode_v4(struct psmouse *psmouse)
 static int alps_hw_init_v4(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
-	unsigned char param[4];
 
 	priv->nibble_commands = alps_v4_nibble_commands;
 	priv->addr_command = PSMOUSE_CMD_DISABLE;
@@ -1634,22 +1718,17 @@ static int alps_hw_init_v4(struct psmouse *psmouse)
 	 * 8-byte format. All the same data seems to be present,
 	 * just in a more compact format.
 	 */
-	param[0] = 0xc8;
-	param[1] = 0x64;
-	param[2] = 0x50;
-	if (ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, &param[2], PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, param, PSMOUSE_CMD_GETID))
+        if (alps_command_mode_send_nibble(psmouse, 0x9) ||
+            alps_command_mode_send_nibble(psmouse, 0x8) ||
+            alps_command_mode_send_nibble(psmouse, 0x7) ||
+            alps_command_mode_send_nibble(psmouse, 0xa))
 		return -1;
 
-	/* Set rate and enable data reporting */
-	param[0] = 0x64;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE)) {
+	if (alps_set_rate_and_enable(psmouse, 0x64)) {
 		psmouse_err(psmouse, "Failed to enable data reporting\n");
 		return -1;
 	}
+
 
 	return 0;
 
@@ -1665,75 +1744,48 @@ error:
 
 static int alps_hw_init_v5(struct psmouse *psmouse)
 {
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
 	unsigned char param[4];
+        int ok = 1;
 
-	ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
+        ok = ok && !psmouse_reset(psmouse);
+        // ok = ok && !psmouse_reset(psmouse);
 
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
+	// useful ? alps_exit_command_mode(psmouse)
 
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
+        ok = ok && !alps_enter_command_mode(psmouse, NULL);
 
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_DIS);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
+        ok = ok && !alps_command_mode_checkset_reg(psmouse, 0xc2c8, 0x81);
 
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
+        /* unconditional */
+        alps_exit_command_mode(psmouse);
+        if (!ok) return -1;
+        ok = 1;
 
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	param[0] = 0xc8;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	param[0] = 0x14;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
+        ok = ok && !alps_get_e7_report(psmouse, param);
 
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
+        alps_e6_sort_of_setmode(psmouse, 0x94);
+        
+        /* Here the windows driver exists and enters command mode. Weird.
+         * Maybe there is some info to grab from the enter_command_mode
+         * then ?
+                alps_enter_command_mode(psmouse);
+                alps_exit_command_mode(psmouse);
+         */
+        ok = ok && !alps_command_mode_write_reg(psmouse, 0xc2c8, 0x82);
+        ok = ok && !alps_command_mode_checkset_reg(psmouse, 0xc2c4, 0x02);
 
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	param[0] = 0x14;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
+        /* Now there is this very weird sequence. I don't understand.
+         * Maybe it's useless ?
+         * # RESET_WRAP()
+         * # SETRES(0x01)
+         * # SETSCALE21()
+         * # RESET_WRAP()
+         * # SETRES(0x01)
+         * # SETSCALE21()
+         * # SETRATE(0xc8)
+         * # GETINFO()
+         */
+        /* In C:
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
 	param[0] = 0x01;
 	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
@@ -1745,153 +1797,74 @@ static int alps_hw_init_v5(struct psmouse *psmouse)
 	param[0] = 0xc8;
 	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
 	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
+        */
 
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	param[0] = 0x00;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
+        ok = ok && !alps_command_mode_write_reg(psmouse, 0xc2cb, 0x00);
+        ok = ok && !alps_command_mode_checkset_reg(psmouse, 0xc2c8, 0x82);
 
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
+        alps_exit_command_mode(psmouse);
 
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_ENABLE);
+        ok = ok && !alps_set_rate_and_enable(psmouse, 0x64);
 
-	return 0;
+        return ok ? 0 : -1;
 }
 
-static int alps_hw_init_v5_mine(struct psmouse *psmouse)
+static int alps_hw_init_v5bis(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
-	unsigned char param[4];
-	int reg_val;
+        int ok = 1;
 
 	priv->nibble_commands = alps_v3_nibble_commands;
         priv->addr_command = PSMOUSE_CMD_RESET_WRAP;;
 
-	if (psmouse_reset(psmouse)) return -1;
-	if (psmouse_reset(psmouse)) return -1;
+        ok = ok && !psmouse_reset(psmouse);
 
-        /* ??? bracketing around the put_configword() calls ? */
+        /* 0xa ??? bracketing around some configuration calls ? */
 	/* ALPS_CMD_NIBBLE_10 is the same as GETID, but expects only one byte */
-        ps2_command(ps2dev, param, ALPS_CMD_NIBBLE_10);
 
-        /* E6 report */
-	/* leaving this out, as I believe that the E6 report is mere
-         * diagnostics, not action. It has been queried already in
-	 * alps_get_model.
-	 *
-	param[0] = 0;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11))
-		return -1;
-	param[0] = param[1] = param[2] = 0xff;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
-		return -1;
-	*/
-	
-	/* E6 report already printed by get_model */
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0xa);
+	/* windows driver checks E6 report at this point */
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0xe);
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0x9);
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0x8);
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0x7);
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0xa);
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0x9);
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0x9);
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0x7);
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0xa);
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0x8);
+        ok = ok && !alps_command_mode_send_nibble(psmouse, 0xf);
+        if (!ok)
+                return -1;
 
+        /* windows: enable, disable */
 
-	alps_command_mode_put_configword(psmouse, 0xe987);
-	alps_command_mode_put_configword(psmouse, 0xa997);
-
-        /* ??? */
-        ps2_command(ps2dev, param, ALPS_CMD_NIBBLE_10);
-
-
-        /* Set rate and enable data reporting */
-	param[0] = 0x64;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE))
-            goto alps_hw_init_v5_mine_error;
-	/* not clear what this call is for... */
-	param[0] = 0x03;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES))
-            goto alps_hw_init_v5_mine_error;
-
-	/*
-        if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE))
-            goto alps_hw_init_v5_mine_error;
-        if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_DISABLE))
-            goto alps_hw_init_v5_mine_error;
-	*/
+        /* windows driver does do_reset and get_e7 here */
+        /* Could it occur that the e7 response changes at this moment ? */
 
         /* make sure we're out of command mode ? */
 	/*
 	if (alps_exit_command_mode(psmouse))
-		goto alps_hw_init_v5_mine_error;
+		goto alps_hw_init_v5bis;
 	*/
+        ok = 1;
 
-	if (alps_enter_command_mode(psmouse, NULL))
-		goto alps_hw_init_v5_mine_error;
+        ok = ok && !alps_enter_command_mode(psmouse, NULL);
+        ok = ok && alps_command_mode_check_reg(psmouse, 0xc2c8, 0x00) > 0;
+        ok = ok && alps_command_mode_check_reg(psmouse, 0xc2c4, 0x00) > 0;
+        ok = ok && !__alps_command_mode_write_reg(psmouse, 0x02);
+        ok = ok && alps_command_mode_check_reg(psmouse, 0xc2d9, 0x00) > 0;
+        ok = ok && !alps_command_mode_write_reg(psmouse, 0xc2cb, 0x00);
+        ok = ok && alps_command_mode_check_reg(psmouse, 0xc2c8, 0x00) > 0;
+        // ok = ok && !__alps_command_mode_write_reg(psmouse, 0x00);
 
-	reg_val = alps_command_mode_read_reg(psmouse, 0xc2c8);
-	if (reg_val != 0x00)
-		goto alps_hw_init_v5_mine_error;
-
-	reg_val = alps_command_mode_read_reg(psmouse, 0xc2c4);
-	if (reg_val != 0x00)
-		goto alps_hw_init_v5_mine_error;
-	if (__alps_command_mode_write_reg(psmouse, 0x02))
-		goto alps_hw_init_v5_mine_error;
-
-	reg_val = alps_command_mode_read_reg(psmouse, 0xc2d9);
-	if (reg_val != 0x00)
-		goto alps_hw_init_v5_mine_error;
-	/*
-	*/
-
-	if (alps_command_mode_write_reg(psmouse, 0xc2cb, 0x00))
-		goto alps_hw_init_v5_mine_error;
-
-	reg_val = alps_command_mode_read_reg(psmouse, 0xc2c8);
-	if (reg_val != 0x00)
-		goto alps_hw_init_v5_mine_error;
-	/*
-	if (__alps_command_mode_write_reg(psmouse, 0x00))
-		goto alps_hw_init_v5_mine_error;
-	*/
-
+        /* Do this unconditionally */
 	alps_exit_command_mode(psmouse);
 
-	/* Set rate and enable data reporting */
-	param[0] = 0x64;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE)) {
-		psmouse_err(psmouse, "Failed to enable data reporting\n");
-		return -1;
-	}
+        ok = ok && !alps_set_rate_and_enable(psmouse, 0x64);
 
-	return 0;
-alps_hw_init_v5_mine_error:
-	/*
-	 * Leaving the touchpad in command mode will essentially render
-	 * it unusable until the machine reboots, so exit it here just
-	 * to be safe
-	 */
-	alps_exit_command_mode(psmouse);
-	return -1;
+        return ok ? 0 : -1;
 }
 
 static int alps_hw_init_v6(struct psmouse *psmouse)
@@ -1899,78 +1872,41 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
 	struct alps_data *priv = psmouse->private;
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
 	unsigned char param[4];
+        int ok = 1;
 
 	/* Doesn't seem to be necessary but we keep here in case
 	   registers need to be used */
 	priv->nibble_commands = alps_v3_nibble_commands;
 
 	priv->addr_command = PSMOUSE_CMD_RESET_WRAP;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
-	if (param[0] != PSMOUSE_RET_BAT && param[1] != PSMOUSE_RET_ID)
-		psmouse_dbg(psmouse, "Bad reset %2.2x %2.2x",
-			    param[0], param[1]);
 
-	ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
-	if (param[0] != PSMOUSE_RET_BAT && param[1] != PSMOUSE_RET_ID)
-		psmouse_dbg(psmouse, "Bad reset %2.2x %2.2x",
-			    param[0], param[1]);
+        /* This prefix initialization is common with v5 init on the Dell
+         * E6230. Maybe this has nothing to do with our touchpad after
+         * all ? */
+        ok = ok && !psmouse_reset(psmouse);
+        // ok = ok && !psmouse_reset(psmouse);
 
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETID);
+        alps_command_mode_send_nibble(psmouse, 0xa);
+	/* windows driver checks E6 report at this point */
+        alps_command_mode_send_nibble(psmouse, 0xe);
+        alps_command_mode_send_nibble(psmouse, 0x9);
+        alps_command_mode_send_nibble(psmouse, 0x8);
+        alps_command_mode_send_nibble(psmouse, 0x7);
+        alps_command_mode_send_nibble(psmouse, 0xa);
+        alps_command_mode_send_nibble(psmouse, 0x9);
+        alps_command_mode_send_nibble(psmouse, 0x9);
+        alps_command_mode_send_nibble(psmouse, 0x7);
+        alps_command_mode_send_nibble(psmouse, 0xa);
+        alps_command_mode_send_nibble(psmouse, 0x8);
+        alps_command_mode_send_nibble(psmouse, 0xf);
 
-	/* E6 report */
-	param[0] = 0;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
+        /* windows: enable, disable */
 
-	/* ?? */
-	param[0] = 0x03;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRES);
+        /* windows driver does do_reset and get_e7 here */
 
-	/* Set 9-byte to 8-byte */
-	param[0] = 0xc8;
-	param[1] = 0x64;
-	param[2] = 0x50;
-	if (ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, &param[2], PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, param, PSMOUSE_CMD_GETID))
-		return -1;
-
-	/* Set rate and enable data reporting? */
-	param[0] = 0xc8;
-	param[1] = 0x50;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_GETID);
-
-	param[0] = 0x64;
-	param[1] = 0x03;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRES);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_DISABLE);
-
-	ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
-	if (param[0] != PSMOUSE_RET_BAT && param[1] != PSMOUSE_RET_ID)
-		psmouse_dbg(psmouse, "Bad reset %2.2x %2.2x",
-			    param[0], param[1]);
-
-	/* E7 report */
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-
-	/* Enter command mode */
+	/* This enter/exit sequence is quite probably useless */
 	alps_enter_command_mode(psmouse, param);
-
-	/* exit command mode */
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
+        alps_exit_command_mode(psmouse);
 
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
@@ -1992,15 +1928,11 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
 	/* Enter command mode */
 	alps_enter_command_mode(psmouse, param);
 
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_DIS);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
+        alps_command_mode_write_reg(psmouse, 0x001f, 0x08);
 
-	param[0] = 0x64;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
+        /* The next sequence would be close to setting register 0x228 to
+         * 0x00, except that we're missing one nibble on the register set
+         * part....*/
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
@@ -2009,34 +1941,28 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
 	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
 
-	/* out of cmd mode? */
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
+        alps_exit_command_mode(psmouse);
+
+        /* This sequence looks very weird */
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_DISABLE);
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-
 	param[0] = 0x64;
 	param[1] = 0x28;
 	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
 	ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE);
-
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-
 	param[0] = 0x50;
 	param[1] = 0x0a;
 	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
 	ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE);
-
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-
 	param[0] = 0x50;
 	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-
 	param[0] = 0x03;
 	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRES);
-
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE);
 
 	return 0;
@@ -2060,7 +1986,7 @@ static int alps_hw_init(struct psmouse *psmouse)
 		ret = alps_hw_init_v4(psmouse);
 		break;
 	case ALPS_PROTO_V5:
-		ret = alps_hw_init_v5_mine(psmouse);
+		ret = alps_hw_init_v5bis(psmouse);
 		break;
 	case ALPS_PROTO_V6:
 		ret = alps_hw_init_v6(psmouse);
