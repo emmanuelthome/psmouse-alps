@@ -20,6 +20,21 @@ History
       of alps signature and command response - both of which determine control 
       protocol
 
+1.2: Try to unify the two V5 init sequences.
+
+How to set up
+-------------
+
+cd to the directory where this readme sits.
+as root, do:
+ $ dkms add .
+ $ modprobe -r psmouse
+ $ dkms build -m psmouse -v custom-1.2 --all
+ $ dkms autoinstall --force
+ $ modprobe psmouse
+
+There is some reporting data in dmesg | grep psmouse
+
 Background
 ----------
 This README documents my work to reverse engineer the Alps touchpad on a
