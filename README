@@ -1,3 +1,21 @@
+$Id: README 710 2012-09-18 18:10:52Z dturvene $
+
+History
+-------
+0.1: hacked in rudimentary support for the Dell IR15 N5110.  Nothing else 
+     should work - probably causing a kernel panic.
+0.2: add logic to isolate N5110 changes from previously supported devices
+     expand diagnostics to capture touchpad protocol
+     add kernel parameter to enable/disable runtime packet debug
+     enabled edge scrolling for N5110
+     add more shell scripts to control/debug device
+
+Todo
+----
+* multi-touch support
+     
+Background
+----------
 This README documents my work to reverse engineer the Alps touchpad on a
 Dell N5110 for Linux.  When I first purchased the laptop and installed
 Ubuntu 12.04, I noticed that the touchpad behaved erratically.  It would
@@ -42,10 +60,6 @@ The ALPS touchpad is working on my N5110.  I can control the touchpad
 somewhat via xinput and the System Settings->Touchpad widget.  I think
 it can still be tightened up but, at least, it's usable now.
 
-One word about the source.  I have added a MOD_DST define in alps.h for
-special handling.  This must be set for the N5110 touchpad.  If it is
-set, probably all other Alps touchpads will not work.
-
 Dave Turvene
 
 [1] http://swapspace.forshee.me/2011/11/touchpad-protocol-reverse-engineering.html
@@ -53,24 +67,46 @@ Dave Turvene
 [3] http://www.spinics.net/lists/linux-input/msg21993.html
 [4] file:///usr/src/linux-source-3.2.0/linux-3.2.0/Documentation/input/alps.txt
 
-function build_alps() {
+bash shell scripts
+------------------
+# I used these scripts to automate some testing.  Note that these may not work
+# on another configuration.  To debug, step through each command in a script to
+# see where it failed.
 
-    echo "Build the psmouse DLKM"
+function install_dkms() {
 
-    echo "clean the current dlkm if it exists"
-    sudo dkms remove psmouse/alps-dst-0.1 --all
-    sudo dkms build psmouse/alps-dst-0.1
+    DLKM=alps-dst-0.2
+    KERN=$(uname -r)
 
-    if [[ $? == 0 ]]; then
-        sudo dkms install psmouse/alps-dst-0.1
-        sudo rmmod psmouse && sudo modprobe -v psmouse
-    else
-        printf "Build failed\n"
-        cat /var/lib/dkms/psmouse/alps-dst-0.1/build/make.log
+    echo "Test for existance, if none copy to /usr/src"
+    if ! [ -f /usr/src/psmouse-$DLKM ]; theno
+        echo "copy $HOME/svn_psmouse to /usr/src/psmouse-$DLKM"
+        sudo cp -vupr $HOME/svn_psmouse /usr/src/psmouse-$DLKM
     fi
 }
 
-function set_system() {
+function build_alps() {
+    DLKM=alps-dst-0.2
+    KERN=$(uname -r)
+
+    echo "/usr/src/psmouse-$DLKM/dkms.conf must have PACKAGE_VERSION set to $DLKM"
+    sudo dkms remove psmouse/$DLKM --all
+
+    echo "/usr/src/psmouse-$DLKM/dkms.conf must have PACKAGE_VERSION set to $DLKM"
+    echo "This places the psmouse.ko dlkm in /lib/modules/$KERN/updates/dkms"
+    sudo dkms build psmouse/$DLKM
+
+    if [[ $? == 0 ]]; then
+        sudo dkms install psmouse/$DLKM
+        sudo rmmod psmouse && sudo modprobe -v psmouse
+    else
+        printf "Build failed\n"
+        cat /var/lib/dkms/psmouse/$DLKM/build/make.log
+    fi
+}
+
+# Function to set up X parameters for cursor and scrolling
+function set_alps() {
 
    echo "Support functions tuning the Alps touchpad"
 
@@ -78,7 +114,48 @@ function set_system() {
    ID=$(xinput --list | grep "AlpsPS/2" | sed -e 's/.*id=\([1-9]\+\).*/\1/')
 
    echo "Get the Velocity Scaling property and set it to a faster value"
-   CSPD=$(xinput list-props 14 | grep "Velocity Scaling" | sed -e 's/.*(\([0-9]\+\)).*/\1/')
-   xinput set-prop $ID $CSPD 40
+   CSPD=$(xinput list-props $ID | grep "Velocity Scaling" | sed -e 's/.*(\([0-9]\+\)).*/\1/')
+   xinput set-prop $ID $CSPD 32
 
+   ES=$(xinput list-props $ID | grep "Edge Scrolling" | sed -e 's/.*(\([0-9]\+\)).*/\1/')
+   echo "enable edge scrolling for virtical only"
+   xinput set-prop $ID --type=int $ES 1 0 0
+   echo "disable edge scrolling"
+   xinput set-prop $ID --type=int $ES 0 0 0
+   xinput list-props $ID | grep $ES
+}
+
+# Enable/Disable runtime packet dump
+# depending on your syslog config, packet dump will appear in dmesg and/or
+# /var/log/syslog.  See man:syslogd for configuring
+function alps_debug() {
+
+    prm_file=/sys/module/psmouse/parameters/alps_debug
+
+    echo "packet debug status"
+    cat $prm_file
+
+    echo "enable alps_debug to dump packets - default"
+    sudo sh -c "echo 1 > $prm_file"
+
+    echo "disable alps_debug to dump packets"
+    sudo sh -c "echo 0 > $prm_file"
+}
+
+# Function to retrieve the touchpad hardware model from BIOS
+# Dell N5110: DLL04B0
+# James says Dell E6230: DLL0532
+function get_dsdt() {
+
+    echo "Suck out the ACPI DSDT"
+    if [ 1 ]; then
+        sudo cat /sys/firmware/acpi/tables/DSDT > DSDT.aml
+    else 
+        sudo acpidump -b -t DSDT -o DSDT.aml
+    fi
+
+    echo "Create DSDT.dsl"
+    iasl -d DSDT.aml
+
+    echo "Search DSDT.aml and post the section inside \"Device (PS2)\""
 }

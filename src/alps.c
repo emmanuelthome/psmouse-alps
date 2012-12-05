@@ -15,7 +15,13 @@
  * the Free Software Foundation.
  */
 
+/* Indicator for my changes */
+#define MOD_DST
+
+/* enable psmouse_dbg, disable to reduce code size */
 #define DEBUG
+
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
@@ -35,6 +41,12 @@
 #define ALPS_BITMAP_Y_BITS	11
 
 #define ALPS_CMD_NIBBLE_10	0x01f2
+
+#ifdef MOD_DST
+static unsigned int alps_debug = 1;
+module_param_named(alps_debug, alps_debug, bool, 0644);
+MODULE_PARM_DESC(alps_debug, "Debug config and packet info, 0 = disable (default), 1 = enabled");
+#endif
 
 static const struct alps_nibble_commands alps_v3_nibble_commands[] = {
 	{ PSMOUSE_CMD_SETPOLL,		0x00 }, /* 0 */
@@ -580,15 +592,6 @@ static void alps_process_touchpad_packet_v3(struct psmouse *psmouse)
 	}
 	input_report_abs(dev, ABS_PRESSURE, z);
 
-    if ( z!=0 ) 
-    {
-        psmouse_dbg(psmouse, "d: %x %x %x %x %x %x = %d %d %d",
-                    packet[0], packet[1], packet[2], packet[3], packet[4], packet[5],
-                    x, y, z);
-
-        psmouse_dbg(psmouse, "mt: %d %d %d %d %d", fingers, x1, y1, x2, y2);
-    }
-
 	input_sync(dev);
 
 	if (!(priv->quirks & ALPS_QUIRK_TRACKSTICK_BUTTONS)) {
@@ -754,12 +757,13 @@ static void alps_process_touchpad_packet_v6(struct psmouse *psmouse)
 	if (x && y && !z)
 		return;
 
-#if 0
-    if ( z!=0 ) 
+#ifdef MOD_DST
+    if ( alps_debug && z!=0 ) 
     {
         psmouse_dbg(psmouse, "d: %x %x %x %x %x %x = %d %d %d",
                     packet[0], packet[1], packet[2], packet[3], packet[4], packet[5],
                     x, y, z);
+    }
 #endif
 
 	if (z > 24)
@@ -804,7 +808,6 @@ static void alps_process_packet(struct psmouse *psmouse)
 #ifdef MOD_DST
     case ALPS_PROTO_V6:
         alps_process_touchpad_packet_v6(psmouse);
-        // alps_process_touchpad_packet_v3(psmouse);
 		break;
 #endif
 	}
@@ -1014,7 +1017,10 @@ static int alps_command_mode_set_addr(struct psmouse *psmouse, int addr)
 	struct alps_data *priv = psmouse->private;
 	int i, nibble;
 
-    psmouse_dbg(psmouse, "Addr %x\n", priv->addr_command);
+#ifdef MOD_DST
+    if (alps_debug)
+        psmouse_dbg(psmouse, "Addr %x\n", priv->addr_command);
+#endif
     
 	if (ps2_command(ps2dev, NULL, priv->addr_command))
 		return -9;
@@ -1074,7 +1080,7 @@ static int alps_command_mode_write_reg(struct psmouse *psmouse, int addr,
 }
 
 static int alps_enter_command_mode(struct psmouse *psmouse,
-				   unsigned char *resp)
+                                   unsigned char *resp)
 {
 	unsigned char param[4];
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
@@ -1088,14 +1094,21 @@ static int alps_enter_command_mode(struct psmouse *psmouse,
 	}
 
 #ifdef MOD_DST
-    psmouse_dbg(psmouse, "Cmdmode: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
+    if (alps_debug) 
+        psmouse_dbg(psmouse, "alps_enter_command_mode: %2.2x %2.2x %2.2x",
+                    param[0], param[1], param[2]);
 
-    /* This is called from alps_get_model after E7 checking
-       Polling shows 0x73 0x01 0x0d
+    /* Warning - cannot use the model yet because some devices have same E7 response
+       but are differentiated by the command mode response
     */
-    if (param[0] != 0x73 && param[1] != 0x01) 
+    if ((param[0] != 0x88 && param[1] != 0x07) &&     /* For V1, V2, V3, V4 */
+        ((param[0] != 0x73 && param[1] != 0x01))       /* For V6 */
+        )
     {
-        psmouse_dbg(psmouse, "Yikes\n");
+        psmouse_dbg(psmouse,
+                    "unknown response while entering command mode: %2.2x %2.2x %2.2x\n",
+                    param[0], param[1], param[2]);
+        return -1;
     }
 #else
     if (param[0] != 0x88 && param[1] != 0x07) {
@@ -1144,7 +1157,7 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
 		return NULL;
 
-	psmouse_dbg(psmouse, "E6 report: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
+	psmouse_info(psmouse, "E6 report: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
 
 	if ((param[0] & 0xf8) != 0 || param[1] != 0 ||
 	    (param[2] != 10 && param[2] != 100))
@@ -1165,7 +1178,7 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
 		return NULL;
 
-	psmouse_dbg(psmouse, "E7 report: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
+	psmouse_info(psmouse, "E7 report: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
 
 	if (version) {
 		for (i = 0; i < ARRAY_SIZE(rates) && param[2] != rates[i]; i++)
@@ -1200,7 +1213,9 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 			}
 			alps_exit_command_mode(psmouse);
 
-            psmouse_dbg(psmouse, "ver=%d, rsp=%2.2x\n", model->proto_version, param[0]);
+#ifdef MOD_DST
+            psmouse_info(psmouse, "ver=%d, rsp=%2.2x\n", model->proto_version, param[0]);
+#endif
             
 			if (!model)
 				psmouse_dbg(psmouse,
@@ -1263,8 +1278,6 @@ static int alps_get_status(struct psmouse *psmouse, char *param)
 	    ps2_command(ps2dev, NULL, PSMOUSE_CMD_DISABLE) ||
 	    ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
 		return -1;
-
-	psmouse_dbg(psmouse, "Status: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
 
 	return 0;
 }
@@ -1885,12 +1898,12 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
     ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-    psmouse_dbg(psmouse, "bf 1a 04: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
+    psmouse_dbg(psmouse, "Match bf 1a 04: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
 
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
     ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-    psmouse_dbg(psmouse, "89 95 84: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
+    psmouse_dbg(psmouse, "Match 89 95 84: %2.2x %2.2x %2.2x", param[0], param[1], param[2]);
 
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
     ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
@@ -1954,7 +1967,6 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
     return 0;
 }
 #endif
-
 
 static int alps_hw_init(struct psmouse *psmouse)
 {
@@ -2065,18 +2077,12 @@ int alps_init(struct psmouse *psmouse)
 	case ALPS_PROTO_V3:
 	case ALPS_PROTO_V4:
 	case ALPS_PROTO_V5:
-#ifdef MOD_DST
-    case ALPS_PROTO_V6:
-#endif
 		set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
             
 		input_mt_init_slots(dev1, 2);
+
 		input_set_abs_params(dev1, ABS_MT_POSITION_X, 0, ALPS_V3_X_MAX, 0, 0);
 		input_set_abs_params(dev1, ABS_MT_POSITION_Y, 0, ALPS_V3_Y_MAX, 0, 0);
-
-#ifdef MOD_DST        
-        psmouse_dbg(psmouse, "alps_init: keybit=%x", dev1->keybit);
-#endif
         
 		set_bit(BTN_TOOL_DOUBLETAP, dev1->keybit);
 		set_bit(BTN_TOOL_TRIPLETAP, dev1->keybit);
@@ -2085,6 +2091,29 @@ int alps_init(struct psmouse *psmouse)
 		input_set_abs_params(dev1, ABS_X, 0, ALPS_V3_X_MAX, 0, 0);
 		input_set_abs_params(dev1, ABS_Y, 0, ALPS_V3_Y_MAX, 0, 0);
 		break;
+#ifdef MOD_DST
+    case ALPS_PROTO_V6:
+        set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
+
+        /* cut-and-paste, need to investigate more */
+        input_mt_init_slots(dev1, 2);
+        input_set_abs_params(dev1, ABS_MT_POSITION_X, 0, 1360, 0, 0);
+        input_set_abs_params(dev1, ABS_MT_POSITION_Y, 0, 660, 0, 0);
+
+		set_bit(BTN_TOOL_DOUBLETAP, dev1->keybit);
+		set_bit(BTN_TOOL_TRIPLETAP, dev1->keybit);
+		set_bit(BTN_TOOL_QUADTAP, dev1->keybit);
+
+        /* Edge-scrolling: vert works with this value, possibly other values */
+        input_set_abs_params(dev1, ABS_X, 0, 1360, 0, 0);
+        /* Edge-scrolling: horiz works with this value, possibly other values */
+		input_set_abs_params(dev1, ABS_Y, 0, 660, 0, 0);
+
+        if (alps_debug)
+            psmouse_dbg(psmouse, "alps_init: keybit=%X", dev1->keybit);
+
+		break;
+#endif
 	}
 
 	input_set_abs_params(dev1, ABS_PRESSURE, 0, 127, 0, 0);
@@ -2134,7 +2163,9 @@ int alps_init(struct psmouse *psmouse)
 	/* We are having trouble resyncing ALPS touchpads so disable it for now */
 	psmouse->resync_time = 0;
 
+#ifdef MOD_DST
     psmouse_dbg(psmouse, "alps_init: success\n");
+#endif    
 	return 0;
 
 init_fail:
@@ -2142,7 +2173,9 @@ init_fail:
 	input_free_device(dev2);
 	kfree(priv);
 	psmouse->private = NULL;
-    psmouse_dbg(psmouse, "alps_init: FAIL\n");
+#ifdef MOD_DST
+    psmouse_err(psmouse, "alps_init: FAIL\n");
+#endif
 	return -1;
 }
 
