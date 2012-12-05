@@ -1,0 +1,207 @@
+This patch applies to qemu-kvm-1.2.0
+
+This is a modified version of the patch by Seth Forshee which appeared
+there first:
+
+http://swapspace.forshee.me/2011/11/touchpad-protocol-reverse-engineering.html
+
+The patch here is no better than the other one. All output _always_ goes
+to a log file, provided the variables PSMOUSE_SERIO_LOG_PATH is set to
+the (writable) log file path, and PSMOUSE_SERIO_LOG_PATH is sent to the
+proper /dev/serio_rawX character device node.
+
+--- a/hw/ps2.c	2012-09-12 17:48:05.000000000 +0200
++++ b/fix/hw/ps2.c	2012-11-24 15:38:24.000000000 +0100
+@@ -21,6 +21,18 @@
+  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+  * THE SOFTWARE.
+  */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <errno.h>
++#include <string.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <poll.h>
++#include <pthread.h>
++
+ #include "hw.h"
+ #include "ps2.h"
+ #include "console.h"
+@@ -108,6 +120,15 @@
+     int mouse_dy;
+     int mouse_dz;
+     uint8_t mouse_buttons;
++    struct {
++	int pt;
++	const char *dev_path;
++	const char *log_path;
++	int fd;
++        FILE * logstream;
++	pthread_t reader;
++	int reader_should_stop;
++    } serio[1];
+ } PS2MouseState;
+ 
+ /* Table to convert from PC scancodes to raw scancodes.  */
+@@ -146,6 +167,111 @@
+     s->update_irq(s->update_arg, 1);
+ }
+ 
++
++/*
++ * Serio passthrough support
++ */
++
++/* Thread to read data from serio_raw device and stick it in the
++ * PS/2 queue */
++static void *serio_read_thread(void *data)
++{
++    PS2MouseState *s = data;
++    struct pollfd pfd;
++    int ret;
++    unsigned char byte;
++
++    pfd.fd = s->serio->fd;
++    pfd.events = POLLIN;
++
++    while (!s->serio->reader_should_stop) {
++        ret = poll(&pfd, 1, -1);
++        if (ret < 0) {
++            if (errno == EINTR) {
++                if (s->serio->reader_should_stop)
++                    break;
++                error_report("reader received spurious signal");
++                continue;
++            }
++
++            error_printf("reader: poll returned error: %s\n", strerror(errno));
++            break;
++        }
++
++        if (!(pfd.revents & POLLIN))
++            continue;
++
++        if (read(s->serio->fd, &byte, 1) != 1) {
++            if (errno) {
++                if (errno == EINTR) {
++                    error_report("read returned EINTR\n");
++                    continue;
++                }
++                error_printf("Error reading from serio device: %s\n",
++                             strerror(errno));
++            } else {
++                error_report("Error reading from serio device\n");
++            }
++            break;
++        }
++
++        ps2_queue(&s->common, byte);
++
++        /*
++         * We know the buffer is big enough (with plenty of extra
++         * padding to boot), so we just use sprintf.
++         */
++        ret = fprintf(s->serio->logstream, "R %02hhx\n", byte);
++    }
++
++    pthread_exit(NULL);
++}
++
++static void serio_pt_init(PS2MouseState *s)
++{
++    memset(s->serio, 0, sizeof(s->serio));
++
++    s->serio->pt = 0;
++    s->serio->fd = -1;
++    s->serio->dev_path = getenv("PSMOUSE_SERIO_DEV_PATH");
++    s->serio->log_path = getenv("PSMOUSE_SERIO_LOG_PATH");
++
++    if (!s->serio->log_path) return;
++    s->serio->logstream = fopen(s->serio->log_path, "w");
++    setbuf(s->serio->logstream, NULL);
++
++    if (!s->serio->dev_path) {
++        fprintf(s->serio->logstream, "No serio device specified in environment\n");
++        goto cleanup;
++        return;
++    }
++
++    s->serio->fd = open(s->serio->dev_path, O_RDWR);
++    if (s->serio->fd < 0) {
++        fprintf(s->serio->logstream, "Open of serio device failed: %s\n", strerror(errno));
++        goto cleanup;
++        return;
++    }
++
++    s->serio->reader_should_stop = 0;
++    if (pthread_create(&s->serio->reader, NULL, serio_read_thread, s) != 0) {
++        error_printf("Error creating serio reader thread: %s\n",
++                     strerror(errno));
++        goto cleanup;
++    }
++
++    s->serio->pt = 1;
++    return;
++
++cleanup:
++    fclose(s->serio->logstream);
++    if (s->serio->fd >= 0)
++        close(s->serio->fd);
++    memset(s->serio, 0, sizeof(s->serio));
++    s->serio->fd = -1;
++}
++
++
+ /*
+    keycode is expressed as follow:
+    bit 7    - 0 key pressed, 1 = key released
+@@ -357,6 +483,10 @@
+ {
+     PS2MouseState *s = opaque;
+ 
++    /* do nothing if in serio passthrough mode */
++    if (s->serio->pt)
++        return;
++
+     /* check if deltas are recorded when disabled */
+     if (!(s->mouse_status & MOUSE_STATUS_ENABLED))
+         return;
+@@ -394,6 +524,14 @@
+ void ps2_write_mouse(void *opaque, int val)
+ {
+     PS2MouseState *s = (PS2MouseState *)opaque;
++    unsigned char byte = (unsigned char)(val & 0xff);
++
++    if (s->serio->pt) {
++        write(s->serio->fd, &byte, 1);
++        fprintf(s->serio->logstream, "S %02hhx\n", byte);
++        return;
++    }
++
+ #ifdef DEBUG_MOUSE
+     printf("kbd: write mouse 0x%02x\n", val);
+ #endif
+@@ -553,6 +691,10 @@
+     s->mouse_dy = 0;
+     s->mouse_dz = 0;
+     s->mouse_buttons = 0;
++    if (s->serio->logstream)
++        fclose(s->serio->logstream);
++    memset(s->serio, 0, sizeof(s->serio));
++    s->serio->fd = -1;
+ }
+ 
+ static const VMStateDescription vmstate_ps2_common = {
+@@ -667,6 +809,8 @@
+ {
+     PS2MouseState *s = (PS2MouseState *)g_malloc0(sizeof(PS2MouseState));
+ 
++    serio_pt_init(s);
++
+     s->common.update_irq = update_irq;
+     s->common.update_arg = update_arg;
+     vmstate_register(NULL, 0, &vmstate_ps2_mouse, s);

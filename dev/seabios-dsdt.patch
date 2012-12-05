@@ -1,0 +1,99 @@
+This patch applies to the dsdt found in seabios-1.7.0
+diff --git a/src/acpi-dsdt.dsl b/src/acpi-dsdt.dsl
+index 711302e..c05e967 100644
+--- a/src/acpi-dsdt.dsl
++++ b/src/acpi-dsdt.dsl
+@@ -342,6 +342,7 @@ DefinitionBlock (
+             }
+ 
+             /* Keyboard seems to be important for WinXP install */
++            /*
+             Device (KBD)
+             {
+                 Name (_HID, EisaId ("PNP0303"))
+@@ -372,8 +373,55 @@ DefinitionBlock (
+                     Return (TMP)
+                 }
+             }
++            */
++            Device (PS2K)
++            {
++                Name (_HID, "DLLK0532")
++                Name (_CID, EisaId ("PNP0303"))
++                Method (_STA, 0, NotSerialized)
++                {
++                    Return (0x0F)
++                }
++
++                Name (_CRS, ResourceTemplate ()
++                {
++                    IO (Decode16,
++                        0x0060,             // Range Minimum
++                        0x0060,             // Range Maximum
++                        0x00,               // Alignment
++                        0x01,               // Length
++                        )
++                    IO (Decode16,
++                        0x0064,             // Range Minimum
++                        0x0064,             // Range Maximum
++                        0x00,               // Alignment
++                        0x01,               // Length
++                        )
++                    IRQ (Edge, ActiveHigh, Exclusive, )
++                        {1}
++                })
++                Name (_PRS, ResourceTemplate ()
++                {
++                    StartDependentFn (0x00, 0x00)
++                    {
++                        FixedIO (
++                            0x0060,             // Address
++                            0x01,               // Length
++                            )
++                        FixedIO (
++                            0x0064,             // Address
++                            0x01,               // Length
++                            )
++                        IRQNoFlags ()
++                            {1}
++                    }
++                    EndDependentFn ()
++                })
++            }
++
+ 
+ 	    /* PS/2 mouse */
++            /*
+             Device (MOU)
+             {
+                 Name (_HID, EisaId ("PNP0F13"))
+@@ -391,6 +439,29 @@ DefinitionBlock (
+                     Return (TMP)
+                 }
+             }
++            */
++
++            Device (PS2M)
++            {
++                Name (_HID, EisaId ("DLL0532"))
++                Name (_CID, EisaId ("PNP0F13"))
++                Name (_CRS, ResourceTemplate ()
++                {
++                    IRQ (Edge, ActiveHigh, Exclusive, )
++                        {12}
++                })
++                Name (_PRS, ResourceTemplate ()
++                {
++                    StartDependentFn (0x00, 0x00)
++                    {
++                        IRQNoFlags ()
++                            {12}
++                    }
++                    EndDependentFn ()
++                })
++            }
++
++
+ 
+ 	    /* PS/2 floppy controller */
+ 	    Device (FDC0)

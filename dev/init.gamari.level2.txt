@@ -1,0 +1,26 @@
+do_reset
+do_reset
+exit_command_mode
+enter_command_mode
+read_and_set_command(c2c8, 0x81)
+exit_command_mode
+get_e7_report
+sortofsetmode(0x94)
+exit_command_mode
+enter_command_mode
+set_command(c2c8, 0x82)
+read_and_set_command(c2c4, 0x02)
+# Here there's some weird stuff:
+# RESET_WRAP()
+# SETRES(0x01)
+# SETSCALE21()
+# RESET_WRAP()
+# SETRES(0x01)
+# SETSCALE21()
+# SETRATE(0xc8)
+# GETINFO()
+set_command(c2cb, 0x00)
+read_and_set_command(c2c8, 0x82)
+exit_command_mode
+setrate(0x64)
+enable
