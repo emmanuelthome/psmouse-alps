@@ -116,7 +116,7 @@ static const struct alps_model_info alps_model_data[] = {
 	{ { 0x73, 0x02, 0x64 },	0x9b, ALPS_PROTO_V3, 0x8f, 0x8f, ALPS_DUALPOINT },
 	{ { 0x73, 0x02, 0x64 },	0x9d, ALPS_PROTO_V3, 0x8f, 0x8f, ALPS_DUALPOINT },
 	{ { 0x73, 0x02, 0x64 },	0x8a, ALPS_PROTO_V4, 0x8f, 0x8f, 0 },
-	/* Dell Latitude E6430, E6530 */
+	/* Dell Latitude E6230 (no trackstick), E6430, E6530 */
 	{ { 0x73, 0x03, 0x0a },	0x1d, ALPS_PROTO_V5, 0x8f, 0x8f, ALPS_DUALPOINT },
 	/* Dell Inspiron N5110 */
 	{ { 0x73, 0x03, 0x50 }, 0x0d, ALPS_PROTO_V6, 0xc8, 0xc8, 0 },
@@ -988,11 +988,15 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
 
 	/* This test is not valid for V6 multi-touch mode!
 	   Need to restructure this code down the road */
+        /* For V5, we do encounter packets with packet[5]=0xfd */
 	if (model->proto_version != ALPS_PROTO_V6) {
 
 		/* Bytes 2 - pktsize should have 0 in the highest bit */
 		if (psmouse->pktcnt >= 2 && psmouse->pktcnt <= psmouse->pktsize
-		    && (psmouse->packet[psmouse->pktcnt - 1] & 0x80)) {
+		    && (psmouse->packet[psmouse->pktcnt - 1] & 0x80)
+                    && !(psmouse->pktcnt == 6 &&
+                        model->proto_version == ALPS_PROTO_V5))
+                {
 			psmouse_dbg(psmouse, "refusing packet[%i] = %x\n",
 				    psmouse->pktcnt - 1,
 				    psmouse->packet[psmouse->pktcnt - 1]);
@@ -1027,23 +1031,6 @@ static int alps_command_mode_send_nibble(struct psmouse *psmouse, int nibble)
 
 	return 0;
 }
-
-#if 0
-/* For the moment we have nothing which says that config words are
- * 16-byte oriented. */
-static int alps_command_mode_put_configword(struct psmouse *psmouse, int word)
-{
-	int i, nibble;
-
-	for (i = 12; i >= 0; i -= 4) {
-		nibble = (word >> i) & 0xf;
-		if (alps_command_mode_send_nibble(psmouse, nibble))
-			return -1;
-	}
-
-	return 0;
-}
-#endif
 
 static int alps_command_mode_set_addr(struct psmouse *psmouse, int addr)
 {
@@ -1112,7 +1099,10 @@ static int alps_command_mode_write_reg(struct psmouse *psmouse, int addr,
 static int alps_command_mode_check_reg(struct psmouse * psmouse, int addr, u8 value)
 {
         int reg_val = alps_command_mode_read_reg(psmouse, addr);
-        if (reg_val < 0) return -1;
+        if (reg_val < 0) {
+                psmouse_err(psmouse, "register %04x: cannot set address", addr);
+                return -1;
+        }
         if (reg_val != value) {
                 psmouse_info(psmouse, "register %04x: got value %2.2x, differs from expected %2.2x", addr, reg_val, value);
         } else {
@@ -1127,13 +1117,16 @@ static int alps_command_mode_check_reg(struct psmouse * psmouse, int addr, u8 va
 static int alps_command_mode_checkset_reg(struct psmouse * psmouse, int addr, u8 value)
 {
         int reg_val = alps_command_mode_read_reg(psmouse, addr);
-        if (reg_val < 0) return -1;
+        if (reg_val < 0) {
+                psmouse_err(psmouse, "register %04x: cannot set address", addr);
+                return -1;
+        }
         psmouse_info(psmouse, "register %04x: previous value %2.2x, now setting %2.2x", addr, reg_val, value);
         if (__alps_command_mode_write_reg(psmouse, value)) {
                 psmouse_info(psmouse, "register %04x: error setting value %2.2x", addr, value);
                 return -1;
         }
-        return 0;
+        return reg_val;
 }
 
 static int alps_enter_command_mode(struct psmouse *psmouse,
@@ -1466,11 +1459,14 @@ static int alps_hw_init_v1_v2(struct psmouse *psmouse)
  * Enable or disable passthrough mode to the trackstick. Must be in
  * command mode when calling this function.
  */
-static int alps_passthrough_mode_v3(struct psmouse *psmouse, bool enable)
+static int alps_passthrough_mode_v3_v5(struct psmouse *psmouse, bool enable)
 {
+	struct alps_data *priv = psmouse->private;
+	const struct alps_model_info *model = priv->i;
 	int reg_val;
+        int reg_base = (model->proto_version == ALPS_PROTO_V5) ? 0xc2c0 : 0;
 
-	reg_val = alps_command_mode_read_reg(psmouse, 0x0008);
+	reg_val = alps_command_mode_read_reg(psmouse, reg_base + 0x8);
 	if (reg_val == -1)
 		return -1;
 
@@ -1505,8 +1501,8 @@ static int alps_e6_sort_of_setmode(struct psmouse * psmouse, u8 byte)
 {
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
         /*
-         * Not sure what this does, but it is absolutely essential.
-         * Without it, the touchpad does not work at all and the
+         * Not sure what this does, but it is absolutely essential for V3
+         * and V5.  Without it, the touchpad does not work at all and the
          * trackstick just emits normal PS/2 packets.
          * 
          * We conjecture that various bytes could be sent, but we've seen
@@ -1529,7 +1525,7 @@ static int alps_e6_sort_of_setmode(struct psmouse * psmouse, u8 byte)
 
 static int alps_set_rate_and_enable(struct psmouse * psmouse, u8 rate)
 {
-    /* Set rate and enable data reporting */
+        /* Set rate and enable data reporting */
         struct ps2dev *ps2dev = &psmouse->ps2dev;
         unsigned char param[4];
         param[0] = 0x64;
@@ -1542,120 +1538,138 @@ static int alps_set_rate_and_enable(struct psmouse * psmouse, u8 rate)
         return 0;
 }
 
-static int alps_hw_init_v3(struct psmouse *psmouse)
+/* This does the common trackstick-related part of the initialization for
+ * v3 and v5 touchpads.  This function must be called from command mode,
+ * but leaves it temporarily.
+ */
+static int alps_hw_init_v3_v5_trackstick_stuff(struct psmouse *psmouse)
+{
+	struct alps_data *priv = psmouse->private;
+	const struct alps_model_info *model = priv->i;
+	int reg_val;
+	unsigned char param[4];
+        int reg_base = (model->proto_version == ALPS_PROTO_V5) ? 0xc2c0 : 0;
+        int z = 0;
+
+	/* Check for trackstick */
+	reg_val = alps_command_mode_read_reg(psmouse, reg_base + 0x8);
+	if (reg_val == -1)
+                return -1;
+
+        if (!(reg_val & 0x80)) {
+		return 0;
+        }
+
+        /* Still in command mode */
+        z = z || alps_passthrough_mode_v3_v5(psmouse, true);
+        /* leave command mode temporarily */
+        z = z || alps_exit_command_mode(psmouse);
+
+        if (z)
+                return -1;
+
+
+        /*
+         * Get E7 report for the trackstick
+         *
+         * There have been reports of failures which seem to trace back
+         * to the above trackstick check failing. When these occur this
+         * E7 report fails, so when that happens we continue with the
+         * assumption that there isn't a trackstick after all.
+         *
+         * (the E7 response when in trackstick passthrough mode is
+         * different from the normal one)
+         */
+        if (alps_get_e7_report(psmouse, param) == 0) {
+                psmouse_dbg(psmouse,
+                                "trackstick E7 report: %2.2x %2.2x %2.2x\n",
+                                param[0], param[1], param[2]);
+
+                /* Somewhat magical */
+                if (alps_e6_sort_of_setmode(psmouse, 0x94)) {
+                        goto error_passthrough;
+                }
+        } else {
+                psmouse_warn(psmouse, "trackstick E7 report failed\n");
+        }
+
+        if (alps_enter_command_mode(psmouse, NULL)) {
+                /* We are in trouble, since we can't disable the
+                 * passthrough mode */
+                psmouse_err(psmouse, "trackstick passthrough mode still on\n");
+                return -1;
+        }
+        z = alps_command_mode_write_reg(psmouse, reg_base + 0x8, 0x82) || z;
+        z = alps_passthrough_mode_v3_v5(psmouse, false) || z;
+        return z ? -1 : 0;
+
+error_passthrough:
+        if (alps_enter_command_mode(psmouse, NULL) == 0) {
+                alps_passthrough_mode_v3_v5(psmouse, false);
+        }
+        return -1;
+}
+
+static int alps_hw_init_v3_v5(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
 	int reg_val;
-	unsigned char param[4];
+	const struct alps_model_info *model = priv->i;
+        int z = 0;      /* error marker */
 
 	priv->nibble_commands = alps_v3_nibble_commands;
 	priv->addr_command = PSMOUSE_CMD_RESET_WRAP;
 
 	if (alps_enter_command_mode(psmouse, NULL))
-		goto error;
-
-	/* Check for trackstick */
-	reg_val = alps_command_mode_read_reg(psmouse, 0x0008);
-	if (reg_val == -1)
-		goto error;
-	if (reg_val & 0x80) {
-		if (alps_passthrough_mode_v3(psmouse, true))
-			goto error;
-		if (alps_exit_command_mode(psmouse))
-			goto error;
-
-		/*
-		 * E7 report for the trackstick
-		 *
-		 * There have been reports of failures to seem to trace back
-		 * to the above trackstick check failing. When these occur
-		 * this E7 report fails, so when that happens we continue
-		 * with the assumption that there isn't a trackstick after
-		 * all.
-		 */
-		param[0] = 0x64;        /* ??? Completely useless */
-                if (alps_get_e7_report(psmouse, param)) {
-			psmouse_warn(psmouse, "trackstick E7 report failed\n");
-		} else {
-			psmouse_dbg(psmouse,
-				    "trackstick E7 report: %2.2x %2.2x %2.2x\n",
-				    param[0], param[1], param[2]);
-
-                        alps_e6_sort_of_setmode(psmouse, 0x94);
-		}
-
-		if (alps_enter_command_mode(psmouse, NULL))
-			goto error_passthrough;
-		if (alps_passthrough_mode_v3(psmouse, false))
-			goto error;
+                return -1;
+        if (alps_hw_init_v3_v5_trackstick_stuff(psmouse)) {
+                alps_exit_command_mode(psmouse);
+                return -1;
 	}
 
-	if (alps_absolute_mode_v3(psmouse)) {
-		psmouse_err(psmouse, "Failed to enter absolute mode\n");
-		goto error;
-	}
+        if (model->proto_version == ALPS_PROTO_V3) {
+                z = z || alps_absolute_mode_v3(psmouse);
+                reg_val = alps_command_mode_read_reg(psmouse, 0x0006);
+                z = z || reg_val < 0;
+                z = z || __alps_command_mode_write_reg(psmouse, reg_val | 0x01);
 
-	reg_val = alps_command_mode_read_reg(psmouse, 0x0006);
-	if (reg_val == -1)
-		goto error;
-	if (__alps_command_mode_write_reg(psmouse, reg_val | 0x01))
-		goto error;
+                reg_val = alps_command_mode_read_reg(psmouse, 0x0007);
+                z = z || reg_val < 0;
+                z = z || __alps_command_mode_write_reg(psmouse, reg_val | 0x01);
 
-	reg_val = alps_command_mode_read_reg(psmouse, 0x0007);
-	if (reg_val == -1)
-		goto error;
-	if (__alps_command_mode_write_reg(psmouse, reg_val | 0x01))
-		goto error;
-
-	if (alps_command_mode_read_reg(psmouse, 0x0144) == -1)
-		goto error;
-	if (__alps_command_mode_write_reg(psmouse, 0x04))
-		goto error;
-
-	if (alps_command_mode_read_reg(psmouse, 0x0159) == -1)
-		goto error;
-	if (__alps_command_mode_write_reg(psmouse, 0x03))
-		goto error;
-
-	if (alps_command_mode_read_reg(psmouse, 0x0163) == -1)
-		goto error;
-	if (alps_command_mode_write_reg(psmouse, 0x0163, 0x03))
-		goto error;
-
-	if (alps_command_mode_read_reg(psmouse, 0x0162) == -1)
-		goto error;
-	if (alps_command_mode_write_reg(psmouse, 0x0162, 0x04))
-		goto error;
+                z = z || alps_command_mode_checkset_reg(psmouse, 0x0144, 0x04);
+                z = z || alps_command_mode_checkset_reg(psmouse, 0x0159, 0x03);
+                z = z || alps_command_mode_checkset_reg(psmouse, 0x0163, 0x03);
+                z = z || alps_command_mode_checkset_reg(psmouse, 0x0162, 0x04);
+                /*
+                 * This ensures the trackstick packets are in the format
+                 * supported by this driver. If bit 1 isn't set the packet
+                 * format is different.
+                 *
+                 * FIXME I doubt that this is correct when there is no
+                 * trackstick. If there is one, the register below has
+                 * already been set in the trackstick init code.
+                 */
+                z = z || alps_command_mode_write_reg(psmouse, 0x0008, 0x82);
+        } else {
+                z = z || alps_command_mode_write_reg(psmouse, 0xc2c4, 0x02);
+                // windows code also checks c2d9 being 0
+                z = z || alps_command_mode_write_reg(psmouse, 0xc2cb, 0x00);
+        }
 
 	/*
-	 * This ensures the trackstick packets are in the format
-	 * supported by this driver. If bit 1 isn't set the packet
-	 * format is different.
+         * Leaving the touchpad in command mode will essentially render
+         * it unusable until the machine reboots, so we make the
+         * exit_command_mode call unconditional to be safe
 	 */
-	if (alps_command_mode_write_reg(psmouse, 0x0008, 0x82))
-		goto error;
-
-	alps_exit_command_mode(psmouse);
+        z = alps_exit_command_mode(psmouse) || z;
+        if (z) return -1;
 
 	if (alps_set_rate_and_enable(psmouse, 0x64)) {
 		psmouse_err(psmouse, "Failed to enable data reporting\n");
 		return -1;
 	}
-
 	return 0;
-
-error_passthrough:
-	/* Something failed while in passthrough mode, so try to get out */
-	if (!alps_enter_command_mode(psmouse, NULL))
-		alps_passthrough_mode_v3(psmouse, false);
-error:
-	/*
-	 * Leaving the touchpad in command mode will essentially render
-	 * it unusable until the machine reboots, so exit it here just
-	 * to be safe
-	 */
-	alps_exit_command_mode(psmouse);
-	return -1;
 }
 
 /* Must be in command mode when calling this function */
@@ -1744,92 +1758,20 @@ error:
 	return -1;
 }
 
-static int alps_hw_init_v5(struct psmouse *psmouse)
-{
-	struct alps_data *priv = psmouse->private;
-	unsigned char param[4];
-        int ok = 1;
-        int reg_val;
-        int has_trackstick;
-
-	priv->nibble_commands = alps_v3_nibble_commands;
-        priv->addr_command = PSMOUSE_CMD_RESET_WRAP;;
-
-        ok = ok && !psmouse_reset(psmouse);
-        ok = ok && !alps_enter_command_mode(psmouse, NULL);
-        if (!ok) return -1;
-
-        ok = ok && (reg_val = alps_command_mode_read_reg(psmouse, 0xc2c8)) >= 0;
-        if (!ok) {
-            alps_exit_command_mode(psmouse);
-            return -1;
-        }
-
-        /* we assume this means a trackstick exists */
-        has_trackstick = reg_val & 0x80;
-
-        if (has_trackstick) {
-            /* I guess this means set passthrough mode */
-            ok = ok && !__alps_command_mode_write_reg(psmouse, 0x81);
-            // other option would be reg_val | 0x01 instead of 0x81
-
-            alps_exit_command_mode(psmouse);
-            if (!ok) return -1;
-
-            if (alps_get_e7_report(psmouse, param)) {
-                psmouse_warn(psmouse, "trackstick E7 report failed\n");
-                /* Don't fail completely. Just proceed as if we had no
-                 * trackstick. */
-                has_trackstick = 0;
-            } else {
-                psmouse_dbg(psmouse,
-                        "trackstick E7 report: %2.2x %2.2x %2.2x\n",
-                        param[0], param[1], param[2]);
-                /* This magic sequence is trackstick-specific */
-                ok = ok && !alps_e6_sort_of_setmode(psmouse, 0x94);
-            }
-
-            ok = ok && !alps_enter_command_mode(psmouse, NULL);
-            /* now disable passthrough mode, but also more than that (bit 1) */
-            ok = ok && !alps_command_mode_checkset_reg(psmouse, 0xc2c8,
-                    has_trackstick ? 0x82 : 0x00);
-	}
-
-        ok = ok && !alps_command_mode_checkset_reg(psmouse, 0xc2c4, 0x02);
-        ok = ok && alps_command_mode_check_reg(psmouse, 0xc2d9, 0x00) > 0;
-
-        ok = ok && !alps_command_mode_write_reg(psmouse, 0xc2cb, 0x00);
-        ok = ok && !alps_command_mode_checkset_reg(psmouse, 0xc2c8,
-                has_trackstick ? 0x82 : 0x00);
-
-        alps_exit_command_mode(psmouse);
-
-        ok = ok && !alps_set_rate_and_enable(psmouse, 0x64);
-
-        return ok ? 0 : -1;
-}
-
 static int alps_hw_init_v6(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
 	unsigned char param[4];
-        int ok = 1;
 
-	/* Doesn't seem to be necessary but we keep here in case
-	   registers need to be used */
 	priv->nibble_commands = alps_v3_nibble_commands;
-
 	priv->addr_command = PSMOUSE_CMD_RESET_WRAP;
 
-        /* This prefix initialization is common with v5 init on the Dell
-         * E6230. Maybe this has nothing to do with our touchpad after
-         * all ? */
-        ok = ok && !psmouse_reset(psmouse);
-        // ok = ok && !psmouse_reset(psmouse);
+        if (psmouse_reset(psmouse))
+                return -1;
 
         alps_command_mode_send_nibble(psmouse, 0xa);
-	/* windows driver checks E6 report at this point */
+        alps_get_e6_report(psmouse, param);
         alps_command_mode_send_nibble(psmouse, 0xe);
         alps_command_mode_send_nibble(psmouse, 0x9);
         alps_command_mode_send_nibble(psmouse, 0x8);
@@ -1842,13 +1784,18 @@ static int alps_hw_init_v6(struct psmouse *psmouse)
         alps_command_mode_send_nibble(psmouse, 0x8);
         alps_command_mode_send_nibble(psmouse, 0xf);
 
-        /* windows: enable, disable */
-
-        /* windows driver does do_reset and get_e7 here */
+        /* The sequence below leads me to think that we can probably
+         * jump-start on after the reset below */
+        ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE);
+        ps2_command(ps2dev, NULL, PSMOUSE_CMD_DISABLE);
+        psmouse_reset(psmouse);
+        alps_get_e7_report(psmouse, param);
 
 	/* This enter/exit sequence is quite probably useless */
 	alps_enter_command_mode(psmouse, param);
         alps_exit_command_mode(psmouse);
+
+        /* The real v6 init probably begins here */
 
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
 	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
@@ -1922,13 +1869,11 @@ static int alps_hw_init(struct psmouse *psmouse)
 		ret = alps_hw_init_v1_v2(psmouse);
 		break;
 	case ALPS_PROTO_V3:
-		ret = alps_hw_init_v3(psmouse);
+	case ALPS_PROTO_V5:
+		ret = alps_hw_init_v3_v5(psmouse);
 		break;
 	case ALPS_PROTO_V4:
 		ret = alps_hw_init_v4(psmouse);
-		break;
-	case ALPS_PROTO_V5:
-		ret = alps_hw_init_v5(psmouse);
 		break;
 	case ALPS_PROTO_V6:
 		ret = alps_hw_init_v6(psmouse);
@@ -1967,7 +1912,7 @@ int alps_init(struct psmouse *psmouse)
 	const struct alps_model_info *model;
 	struct input_dev *dev1 = psmouse->dev, *dev2;
 	int version;
-
+        
 	priv = kzalloc(sizeof(struct alps_data), GFP_KERNEL);
 	dev2 = input_allocate_device();
 	if (!priv || !dev2)
