@@ -1974,7 +1974,7 @@ int alps_init(struct psmouse *psmouse)
 	case ALPS_PROTO_V3:
 	case ALPS_PROTO_V4:
 		set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
-		input_mt_init_slots(dev1, 2);
+		input_mt_init_slots(dev1, 2, 0);
 		ALPS_BITMAP_X_BITS = 15;
 		ALPS_BITMAP_Y_BITS = 11;
 		ALPS_X_MAX = 2000;
@@ -1993,7 +1993,7 @@ int alps_init(struct psmouse *psmouse)
 		break;
 	case ALPS_PROTO_V5:
 		set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
-		input_mt_init_slots(dev1, 2);
+		input_mt_init_slots(dev1, 2, 0);
 		ALPS_BITMAP_X_BITS = 16;
 		ALPS_BITMAP_Y_BITS = 12;
 		ALPS_X_MAX = 2000;
@@ -2017,7 +2017,7 @@ int alps_init(struct psmouse *psmouse)
 		ALPS_X_MAX = 1360;
 		ALPS_Y_MAX =  660;
 
-		input_mt_init_slots(dev1, 2);
+		input_mt_init_slots(dev1, 2, 0);
 		input_set_abs_params(dev1,
 				     ABS_MT_POSITION_X, 0, ALPS_X_MAX, 0, 0);
 		input_set_abs_params(dev1,
