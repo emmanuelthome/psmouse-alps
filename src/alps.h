@@ -17,6 +17,12 @@
 #define ALPS_PROTO_V3	2
 #define ALPS_PROTO_V4	3
 
+/* These are in the same "Pinnacle" family but have different init sequences */
+#define ALPS_PIN	0x01
+#define ALPS_PINAG	0x02
+#define ALPS_PINAGX	0x03
+#define ALPS_RUSHMORE	0x04
+
 struct alps_model_info {
         unsigned char signature[3];
 	unsigned char command_mode_resp; /* v3/v4 only */

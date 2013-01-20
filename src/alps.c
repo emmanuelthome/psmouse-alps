@@ -114,6 +114,10 @@ static const struct alps_model_info alps_model_data[] = {
 	{ { 0x73, 0x02, 0x64 },	0x8a, ALPS_PROTO_V4, 0x8f, 0x8f, 0 },
 };
 
+static const struct alps_model_info alps_model_rushmore = {
+	{ ALPS_RUSHMORE }, 0x00, ALPS_PROTO_V3, 0x8f, 0x8f, ALPS_DUALPOINT
+};
+
 /*
  * XXX - this entry is suspicious. First byte has zero lower nibble,
  * which is what a normal mouse would report. Also, the value 0x0e
@@ -393,7 +397,7 @@ static void alps_process_trackstick_packet_v3(struct psmouse *psmouse)
 	struct alps_data *priv = psmouse->private;
 	unsigned char *packet = psmouse->packet;
 	struct input_dev *dev = priv->dev2;
-	int x, y, z, left, right, middle;
+	int x, y, z, left, right, middle, divisor = 8;
 
 	/* Sanity check packet */
 	if (!(packet[0] & 0x40)) {
@@ -408,17 +412,24 @@ static void alps_process_trackstick_packet_v3(struct psmouse *psmouse)
 	if (packet[1] == 0x7f && packet[2] == 0x7f && packet[4] == 0x7f)
 		return;
 
-	x = (s8)(((packet[0] & 0x20) << 2) | (packet[1] & 0x7f));
-	y = (s8)(((packet[0] & 0x10) << 3) | (packet[2] & 0x7f));
-	z = (packet[4] & 0x7c) >> 2;
+	if (priv->i->signature[0] == ALPS_RUSHMORE) {
+		x = (s8)(((packet[0] & 0x20) << 2) | ((packet[1] << 1) & 0x7f));
+		y = (s8)(((packet[2] & 0x10) << 3) | ((packet[4] << 1) & 0x7f));
+		z = (packet[4] & 0x7c) >> 2;
+		divisor = 2;
+	} else {
+		x = (s8)(((packet[0] & 0x20) << 2) | (packet[1] & 0x7f));
+		y = (s8)(((packet[0] & 0x10) << 3) | (packet[2] & 0x7f));
+		z = (packet[4] & 0x7c) >> 2;
+	}
 
 	/*
 	 * The x and y values tend to be quite large, and when used
 	 * alone the trackstick is difficult to use. Scale them down
 	 * to compensate.
 	 */
-	x /= 8;
-	y /= 8;
+	x /= divisor;
+	y /= divisor;
 
 	input_report_rel(dev, REL_X, x);
 	input_report_rel(dev, REL_Y, -y);
@@ -998,7 +1009,7 @@ static int alps_enter_command_mode(struct psmouse *psmouse,
 		return -1;
 	}
 
-	if (param[0] != 0x88 && param[1] != 0x07) {
+	if (param[0] != 0x88) {
 		psmouse_dbg(psmouse,
 			    "unknown response while entering command mode: %2.2x %2.2x %2.2x\n",
 			    param[0], param[1], param[2]);
@@ -1018,6 +1029,34 @@ static inline int alps_exit_command_mode(struct psmouse *psmouse)
 	return 0;
 }
 
+static const struct alps_model_info *alps_probe_pinnacle(
+	struct psmouse *psmouse, int *version)
+{
+	struct ps2dev *ps2dev = &psmouse->ps2dev;
+	unsigned char param[4];
+	const struct alps_model_info *model = NULL;
+
+	if (alps_rpt_cmd(ps2dev, PSMOUSE_CMD_SETSTREAM, PSMOUSE_CMD_RESET_WRAP,
+			 param) ||
+	    param[0] != 0x88 ||
+	    (param[1] != 0x07 && param[1] != 0x08))
+		goto out;
+
+	/* For now this code has only been verified to detect Rushmore */
+	if (param[1] == 0x08)
+		model = &alps_model_rushmore;
+	else if (param[2] >= 0x80 && param[2] <= 0x8f)
+		psmouse_info(psmouse, "detected Pinnacle AG via EC report\n");
+	else if (param[2] >= 0x90 && param[2] <= 0x9d)
+		psmouse_info(psmouse, "detected Pinnacle AGx via EC report\n");
+	else if (param[2] < 0x80)
+		psmouse_info(psmouse, "detected Pinnacle via EC report\n");
+
+out:
+	alps_exit_command_mode(psmouse);
+	return model;
+}
+
 static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int *version)
 {
 	struct ps2dev *ps2dev = &psmouse->ps2dev;
@@ -1025,6 +1064,11 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 	unsigned char param[4];
 	const struct alps_model_info *model = NULL;
 	int i;
+
+	/* Newer devices detect based on the EC report, not the E7 report */
+	model = alps_probe_pinnacle(psmouse, version);
+	if (model)
+		return model;
 
 	/*
 	 * First try "E6 report".
@@ -1287,6 +1331,38 @@ static int alps_absolute_mode_v3(struct psmouse *psmouse)
 	return 0;
 }
 
+static int alps_hw_init_rushmore(struct psmouse *psmouse)
+{
+	struct ps2dev *ps2dev = &psmouse->ps2dev;
+	int reg_val, ret = -1;
+
+	if (alps_command_mode_read_reg(psmouse, 0xc2d9) == -1 ||
+	    alps_command_mode_write_reg(psmouse, 0xc2cb, 0x00))
+		goto error;
+
+	reg_val = alps_command_mode_read_reg(psmouse, 0xc2c6);
+	if (reg_val == -1)
+		goto error;
+	if (__alps_command_mode_write_reg(psmouse, reg_val & 0xfd))
+		goto error;
+
+	if (alps_command_mode_write_reg(psmouse, 0xc2c9, 0x64))
+		goto error;
+
+	reg_val = alps_command_mode_read_reg(psmouse, 0xc2c4);
+	if (reg_val == -1)
+		goto error;
+	if (__alps_command_mode_write_reg(psmouse, reg_val | 0x02))
+		goto error;
+
+	alps_exit_command_mode(psmouse);
+	return ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE);
+
+error:
+	alps_exit_command_mode(psmouse);
+	return ret;
+}
+
 static int alps_hw_init_v3(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
@@ -1299,6 +1375,9 @@ static int alps_hw_init_v3(struct psmouse *psmouse)
 
 	if (alps_enter_command_mode(psmouse, NULL))
 		goto error;
+
+	if (priv->i->signature[0] == ALPS_RUSHMORE)
+		return alps_hw_init_rushmore(psmouse);
 
 	/* Check for trackstick */
 	reg_val = alps_command_mode_read_reg(psmouse, 0x0008);
