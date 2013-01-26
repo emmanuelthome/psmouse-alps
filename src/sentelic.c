@@ -41,7 +41,7 @@
 #define	GET_ABS_Y(packet)	((packet[2] << 2) | (packet[3] & 0x03))
 
 /** Driver version. */
-static const char fsp_drv_ver[] = "1.0.0-K";
+static const char fsp_drv_ver[] = "1.1.0-K";
 
 /*
  * Make sure that the value being sent to FSP will not conflict with
@@ -303,6 +303,27 @@ static int fsp_get_revision(struct psmouse *psmouse, int *rev)
 	return 0;
 }
 
+static int fsp_get_sn(struct psmouse *psmouse, int *sn)
+{
+	int v0, v1, v2;
+	int rc = -EIO;
+
+	/* production number since Cx is available at: 0x0b40 ~ 0x0b42 */
+	if (fsp_page_reg_write(psmouse, FSP_PAGE_0B))
+		goto out;
+	if (fsp_reg_read(psmouse, FSP_REG_SN0, &v0))
+		goto out;
+	if (fsp_reg_read(psmouse, FSP_REG_SN1, &v1))
+		goto out;
+	if (fsp_reg_read(psmouse, FSP_REG_SN2, &v2))
+		goto out;
+	*sn = (v0 << 16) | (v1 << 8) | v2;
+	rc = 0;
+out:
+	fsp_page_reg_write(psmouse, FSP_PAGE_DEFAULT);
+	return rc;
+}
+
 static int fsp_get_buttons(struct psmouse *psmouse, int *btn)
 {
 	static const int buttons[] = {
@@ -411,7 +432,7 @@ static int fsp_onpad_hscr(struct psmouse *psmouse, bool enable)
 static ssize_t fsp_attr_set_setreg(struct psmouse *psmouse, void *data,
 				   const char *buf, size_t count)
 {
-	unsigned long reg, val;
+	int reg, val;
 	char *rest;
 	ssize_t retval;
 
@@ -419,7 +440,11 @@ static ssize_t fsp_attr_set_setreg(struct psmouse *psmouse, void *data,
 	if (rest == buf || *rest != ' ' || reg > 0xff)
 		return -EINVAL;
 
-	if (strict_strtoul(rest + 1, 16, &val) || val > 0xff)
+	retval = kstrtoint(rest + 1, 16, &val);
+	if (retval)
+		return retval;
+
+	if (val > 0xff)
 		return -EINVAL;
 
 	if (fsp_reg_write_enable(psmouse, true))
@@ -451,10 +476,13 @@ static ssize_t fsp_attr_set_getreg(struct psmouse *psmouse, void *data,
 					const char *buf, size_t count)
 {
 	struct fsp_data *pad = psmouse->private;
-	unsigned long reg;
-	int val;
+	int reg, val, err;
 
-	if (strict_strtoul(buf, 16, &reg) || reg > 0xff)
+	err = kstrtoint(buf, 16, &reg);
+	if (err)
+		return err;
+
+	if (reg > 0xff)
 		return -EINVAL;
 
 	if (fsp_reg_read(psmouse, reg, &val))
@@ -483,9 +511,13 @@ static ssize_t fsp_attr_show_pagereg(struct psmouse *psmouse,
 static ssize_t fsp_attr_set_pagereg(struct psmouse *psmouse, void *data,
 					const char *buf, size_t count)
 {
-	unsigned long val;
+	int val, err;
 
-	if (strict_strtoul(buf, 16, &val) || val > 0xff)
+	err = kstrtoint(buf, 16, &val);
+	if (err)
+		return err;
+
+	if (val > 0xff)
 		return -EINVAL;
 
 	if (fsp_page_reg_write(psmouse, val))
@@ -508,9 +540,14 @@ static ssize_t fsp_attr_show_vscroll(struct psmouse *psmouse,
 static ssize_t fsp_attr_set_vscroll(struct psmouse *psmouse, void *data,
 					const char *buf, size_t count)
 {
-	unsigned long val;
+	unsigned int val;
+	int err;
 
-	if (strict_strtoul(buf, 10, &val) || val > 1)
+	err = kstrtouint(buf, 10, &val);
+	if (err)
+		return err;
+
+	if (val > 1)
 		return -EINVAL;
 
 	fsp_onpad_vscr(psmouse, val);
@@ -532,9 +569,14 @@ static ssize_t fsp_attr_show_hscroll(struct psmouse *psmouse,
 static ssize_t fsp_attr_set_hscroll(struct psmouse *psmouse, void *data,
 					const char *buf, size_t count)
 {
-	unsigned long val;
+	unsigned int val;
+	int err;
 
-	if (strict_strtoul(buf, 10, &val) || val > 1)
+	err = kstrtouint(buf, 10, &val);
+	if (err)
+		return err;
+
+	if (val > 1)
 		return -EINVAL;
 
 	fsp_onpad_hscr(psmouse, val);
@@ -979,16 +1021,21 @@ static int fsp_reconnect(struct psmouse *psmouse)
 int fsp_init(struct psmouse *psmouse)
 {
 	struct fsp_data *priv;
-	int ver, rev;
+	int ver, rev, sn = 0;
 	int error;
 
 	if (fsp_get_version(psmouse, &ver) ||
 	    fsp_get_revision(psmouse, &rev)) {
 		return -ENODEV;
 	}
+	if (ver >= FSP_VER_STL3888_C0) {
+		/* firmware information is only available since C0 */
+		fsp_get_sn(psmouse, &sn);
+	}
 
-	psmouse_info(psmouse, "Finger Sensing Pad, hw: %d.%d.%d, sw: %s\n",
-		     ver >> 4, ver & 0x0F, rev, fsp_drv_ver);
+	psmouse_info(psmouse,
+		     "Finger Sensing Pad, hw: %d.%d.%d, sn: %x, sw: %s\n",
+		     ver >> 4, ver & 0x0F, rev, sn, fsp_drv_ver);
 
 	psmouse->private = priv = kzalloc(sizeof(struct fsp_data), GFP_KERNEL);
 	if (!priv)

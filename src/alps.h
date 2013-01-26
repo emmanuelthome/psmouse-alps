@@ -16,15 +16,13 @@
 #define ALPS_PROTO_V2	1
 #define ALPS_PROTO_V3	2
 #define ALPS_PROTO_V4	3
-#define ALPS_PROTO_V5   4
-#define ALPS_PROTO_V6   5
 
 struct alps_model_info {
-    unsigned char signature[3];
+        unsigned char signature[3];
 	unsigned char command_mode_resp; /* v3/v4 only */
 	unsigned char proto_version;
-    unsigned char byte0, mask0;
-    unsigned char flags;
+        unsigned char byte0, mask0;
+        unsigned char flags;
 };
 
 struct alps_nibble_commands {
@@ -41,8 +39,8 @@ struct alps_data {
 	int prev_fin;			/* Finger bit from previous packet */
 	int multi_packet;		/* Multi-packet data in progress */
 	unsigned char multi_data[6];	/* Saved multi-packet data */
-    int x1, x2, y1, y2;     /* Coordinates from last MT report */
-    int fingers;            /* Number of fingers from MT report */
+	int x1, x2, y1, y2;		/* Coordinates from last MT report */
+	int fingers;			/* Number of fingers from MT report */
 	u8 quirks;
 	struct timer_list timer;
 };

@@ -7,24 +7,14 @@
  * Copyright (c) 2005 Vojtech Pavlik <vojtech@suse.cz>
  * Copyright (c) 2009 Sebastian Kapfer <sebastian_kapfer@gmx.net>
  *
- * 2012: A large number of contributors have added to this driver
- * for new alps touchpads. The V5 and V6 initialization protocols are taken
- * empirically from qemu virtual guest os dumps using the procedure at
- * http://swapspace.forshee.me/2011/11/touchpad-protocol-reverse-engineering.html
- * The qemu DSDT interface had to be updated for the dirver to recognize the
- * REAL alps touchpad rather than a generic ps2 mouse.
- * The code authors recognize little of the logic behind V5 and V6
- * initialization.
- *
- * The tpconfig utility was used to reverse engineer some of the older alps
- * touchpads.  After 2.6 it has marginal use, and should not be used.
+ * ALPS detection, tap switching and status querying info is taken from
+ * tpconfig utility (by C. Scott Ananian and Bruce Kall).
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published by
  * the Free Software Foundation.
  */
 
-#define DEBUG
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
@@ -33,6 +23,15 @@
 
 #include "psmouse.h"
 #include "alps.h"
+
+/*
+ * Definitions for ALPS version 3 and 4 command mode protocol
+ */
+#define ALPS_V3_X_MAX	2000
+#define ALPS_V3_Y_MAX	1400
+
+#define ALPS_BITMAP_X_BITS	15
+#define ALPS_BITMAP_Y_BITS	11
 
 #define ALPS_CMD_NIBBLE_10	0x01f2
 
@@ -106,29 +105,14 @@ static const struct alps_model_info alps_model_data[] = {
 	{ { 0x22, 0x02, 0x14 }, 0x00, ALPS_PROTO_V2, 0xff, 0xff, ALPS_PASS | ALPS_DUALPOINT },	/* Dell Latitude D600 */
 	/* Dell Latitude E5500, E6400, E6500, Precision M4400 */
 	{ { 0x62, 0x02, 0x14 }, 0x00, ALPS_PROTO_V2, 0xcf, 0xcf,
-	  ALPS_PASS | ALPS_DUALPOINT | ALPS_PS2_INTERLEAVED },
-	/* Dell Vostro 1400 */
-	{ { 0x73, 0x02, 0x50 }, 0x00, ALPS_PROTO_V2, 0xcf, 0xcf,
-	  ALPS_FOUR_BUTTONS },
-	/* Toshiba Tecra A11-11L */
+		ALPS_PASS | ALPS_DUALPOINT | ALPS_PS2_INTERLEAVED },
+	{ { 0x73, 0x02, 0x50 }, 0x00, ALPS_PROTO_V2, 0xcf, 0xcf, ALPS_FOUR_BUTTONS },		/* Dell Vostro 1400 */
 	{ { 0x52, 0x01, 0x14 }, 0x00, ALPS_PROTO_V2, 0xff, 0xff,
-	  ALPS_PASS | ALPS_DUALPOINT | ALPS_PS2_INTERLEAVED },
+		ALPS_PASS | ALPS_DUALPOINT | ALPS_PS2_INTERLEAVED },				/* Toshiba Tecra A11-11L */
 	{ { 0x73, 0x02, 0x64 },	0x9b, ALPS_PROTO_V3, 0x8f, 0x8f, ALPS_DUALPOINT },
 	{ { 0x73, 0x02, 0x64 },	0x9d, ALPS_PROTO_V3, 0x8f, 0x8f, ALPS_DUALPOINT },
 	{ { 0x73, 0x02, 0x64 },	0x8a, ALPS_PROTO_V4, 0x8f, 0x8f, 0 },
-	/* Dell Latitude E6430, E6530 */
-	{ { 0x73, 0x03, 0x0a },	0x1d, ALPS_PROTO_V5, 0x8f, 0x8f, ALPS_DUALPOINT },
-	/* Dell Inspiron N5110 */
-	{ { 0x73, 0x03, 0x50 }, 0x0d, ALPS_PROTO_V6, 0xc8, 0xc8, 0 },
-	/* Dell Inspiron 17R 7720 */
-	{ { 0x73, 0x03, 0x50 }, 0x02, ALPS_PROTO_V6, 0xc8, 0xc8, 0 },
 };
-
-/* Set these based upon protocol version */
-static int ALPS_X_MAX;		/* right edge */
-static int ALPS_Y_MAX;		/* bottom edge */
-static int ALPS_BITMAP_X_BITS;	/* mt number of x bits */
-static int ALPS_BITMAP_Y_BITS;	/* mt number of y bits */
 
 /*
  * XXX - this entry is suspicious. First byte has zero lower nibble,
@@ -274,7 +258,7 @@ static void alps_process_packet_v1_v2(struct psmouse *psmouse)
 }
 
 /*
- * Process bitmap data from v3/v4/v5/v6 protocols. Returns the number of
+ * Process bitmap data from v3 and v4 protocols. Returns the number of
  * fingers detected. A return value of 0 means at least one of the
  * bitmaps was empty.
  *
@@ -371,16 +355,16 @@ static int alps_process_bitmap(unsigned int x_map, unsigned int y_map,
 		}
 	}
 
-	*x1 = (ALPS_X_MAX * (2 * x_low.start_bit + x_low.num_bits - 1)) /
-		(2 * (ALPS_BITMAP_X_BITS - 1));
-	*y1 = (ALPS_Y_MAX * (2 * y_low.start_bit + y_low.num_bits - 1)) /
-		(2 * (ALPS_BITMAP_Y_BITS - 1));
+	*x1 = (ALPS_V3_X_MAX * (2 * x_low.start_bit + x_low.num_bits - 1)) /
+	      (2 * (ALPS_BITMAP_X_BITS - 1));
+	*y1 = (ALPS_V3_Y_MAX * (2 * y_low.start_bit + y_low.num_bits - 1)) /
+	      (2 * (ALPS_BITMAP_Y_BITS - 1));
 
 	if (fingers > 1) {
-		*x2 = (ALPS_X_MAX * (2 * x_high.start_bit + x_high.num_bits - 1)) /
-			(2 * (ALPS_BITMAP_X_BITS - 1));
-		*y2 = (ALPS_Y_MAX * (2 * y_high.start_bit + y_high.num_bits - 1)) /
-			(2 * (ALPS_BITMAP_Y_BITS - 1));
+		*x2 = (ALPS_V3_X_MAX * (2 * x_high.start_bit + x_high.num_bits - 1)) /
+		      (2 * (ALPS_BITMAP_X_BITS - 1));
+		*y2 = (ALPS_V3_Y_MAX * (2 * y_high.start_bit + y_high.num_bits - 1)) /
+		      (2 * (ALPS_BITMAP_Y_BITS - 1));
 	}
 
 	return fingers;
@@ -404,7 +388,7 @@ static void alps_report_semi_mt_data(struct input_dev *dev, int num_fingers,
 	alps_set_slot(dev, 1, num_fingers == 2, x2, y2);
 }
 
-static void alps_process_trackstick_packet_v3_v5(struct psmouse *psmouse)
+static void alps_process_trackstick_packet_v3(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
 	unsigned char *packet = psmouse->packet;
@@ -464,7 +448,7 @@ static void alps_process_trackstick_packet_v3_v5(struct psmouse *psmouse)
 	return;
 }
 
-static void alps_process_touchpad_packet_v3_v5(struct psmouse *psmouse)
+static void alps_process_touchpad_packet_v3(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
 	unsigned char *packet = psmouse->packet;
@@ -492,15 +476,14 @@ static void alps_process_touchpad_packet_v3_v5(struct psmouse *psmouse)
 		if (packet[0] & 0x40) {
 			fingers = (packet[5] & 0x3) + 1;
 			x_bitmap = ((packet[4] & 0x7e) << 8) |
-				((packet[1] & 0x7f) << 2) |
-				((packet[0] & 0x30) >> 4);
+				   ((packet[1] & 0x7f) << 2) |
+				   ((packet[0] & 0x30) >> 4);
 			y_bitmap = ((packet[3] & 0x70) << 4) |
-				((packet[2] & 0x7f) << 1) |
-				(packet[4] & 0x01);
+				   ((packet[2] & 0x7f) << 1) |
+				   (packet[4] & 0x01);
 
-			bmap_fingers =
-				alps_process_bitmap(x_bitmap, y_bitmap,
-						    &x1, &y1, &x2, &y2);
+			bmap_fingers = alps_process_bitmap(x_bitmap, y_bitmap,
+							   &x1, &y1, &x2, &y2);
 
 			/*
 			 * We shouldn't report more than one finger if
@@ -540,7 +523,7 @@ static void alps_process_touchpad_packet_v3_v5(struct psmouse *psmouse)
 	middle = packet[3] & 0x04;
 
 	x = ((packet[1] & 0x7f) << 4) | ((packet[4] & 0x30) >> 2) |
-		((packet[0] & 0x30) >> 4);
+	    ((packet[0] & 0x30) >> 4);
 	y = ((packet[2] & 0x7f) << 4) | (packet[4] & 0x0f);
 	z = packet[5] & 0x7f;
 
@@ -596,7 +579,7 @@ static void alps_process_touchpad_packet_v3_v5(struct psmouse *psmouse)
 	}
 }
 
-static void alps_process_packet_v3_v5(struct psmouse *psmouse)
+static void alps_process_packet_v3(struct psmouse *psmouse)
 {
 	unsigned char *packet = psmouse->packet;
 
@@ -609,11 +592,11 @@ static void alps_process_packet_v3_v5(struct psmouse *psmouse)
 	 * of packets.
 	 */
 	if (packet[5] == 0x3f) {
-		alps_process_trackstick_packet_v3_v5(psmouse);
+		alps_process_trackstick_packet_v3(psmouse);
 		return;
 	}
 
-	alps_process_touchpad_packet_v3_v5(psmouse);
+	alps_process_touchpad_packet_v3(psmouse);
 }
 
 static void alps_process_packet_v4(struct psmouse *psmouse)
@@ -649,12 +632,12 @@ static void alps_process_packet_v4(struct psmouse *psmouse)
 		priv->multi_packet = 0;
 
 		x_bitmap = ((priv->multi_data[2] & 0x1f) << 10) |
-			((priv->multi_data[3] & 0x60) << 3) |
-			((priv->multi_data[0] & 0x3f) << 2) |
-			((priv->multi_data[1] & 0x60) >> 5);
+			   ((priv->multi_data[3] & 0x60) << 3) |
+			   ((priv->multi_data[0] & 0x3f) << 2) |
+			   ((priv->multi_data[1] & 0x60) >> 5);
 		y_bitmap = ((priv->multi_data[5] & 0x01) << 10) |
-			((priv->multi_data[3] & 0x1f) << 5) |
-			(priv->multi_data[1] & 0x1f);
+			   ((priv->multi_data[3] & 0x1f) << 5) |
+			    (priv->multi_data[1] & 0x1f);
 
 		fingers = alps_process_bitmap(x_bitmap, y_bitmap,
 					      &x1, &y1, &x2, &y2);
@@ -671,7 +654,7 @@ static void alps_process_packet_v4(struct psmouse *psmouse)
 	right = packet[4] & 0x02;
 
 	x = ((packet[1] & 0x7f) << 4) | ((packet[3] & 0x30) >> 2) |
-		((packet[0] & 0x30) >> 4);
+	    ((packet[0] & 0x30) >> 4);
 	y = ((packet[2] & 0x7f) << 4) | (packet[3] & 0x0f);
 	z = packet[5] & 0x7f;
 
@@ -713,92 +696,6 @@ static void alps_process_packet_v4(struct psmouse *psmouse)
 	input_sync(dev);
 }
 
-/* This is similar logic to alps_process_touchpad_packet_v3_v5.	 The
-   bitfield positions are different.
-*/
-static void alps_process_packet_v6(struct psmouse *psmouse)
-{
-	struct alps_data *priv = psmouse->private;
-	unsigned char *packet = psmouse->packet;
-	struct input_dev *dev = psmouse->dev;
-	int x, y, z;
-	int left, right, middle;
-	int x1 = 0, y1 = 0, x2 = 0, y2 = 0;
-	int fingers = 0;
-	unsigned long int x_bitmap, y_bitmap;
-
-	/* multitouch packet */
-	if (priv->multi_packet) {
-		if (packet[0] & 0x20) {
-			fingers = ((packet[0] & 0x6) >> 1 |
-				   (packet[0] & 0x10) >> 2);
-			x_bitmap = ((packet[2] & 0x60) >> 5) |
-				((packet[4] & 0x7f) << 2)  |
-				((packet[5] & 0x7f) << 9)  |
-				((packet[3] & 0x07) << 16) |
-				((packet[3] & 0x70) << 15) |
-				((packet[0] & 0x01) << 22);
-			y_bitmap = (packet[1] & 0x7f) |
-				((packet[2] & 0x1f) << 7);
-
-			alps_process_bitmap(x_bitmap, y_bitmap,
-					    &x1, &y1, &x2, &y2);
-
-			packet = priv->multi_data;
-		} else {
-			priv->multi_packet = 0;
-		}
-	}
-
-	if (packet[0] & 0x20)
-		return;
-
-	if (!priv->multi_packet && (packet[0] & 0x2)) {
-		priv->multi_packet = 1;
-		memcpy(priv->multi_data, packet, sizeof(priv->multi_data));
-		return;
-	}
-	priv->multi_packet = 0;
-
-	left = packet[3] & 0x1;
-	right = packet[3] & 0x2;
-	middle = packet[3] & 0x4;
-
-	x = ((packet[1] & 0x7f) | ((packet[4] & 0x0f) << 7));
-	y = ((packet[2] & 0x7f) | ((packet[4] & 0xf0) << 3));
-	z = (packet[0] & 4) ? 0 : packet[5] & 0x7f;
-
-	if (x && y && !z)
-		return;
-
-	if (!fingers) {
-		x1 = x;
-		y1 = y;
-		fingers = z > 0 ? 1 : 0;
-	}
-
-	if (z > 64)
-		input_report_key(dev, BTN_TOUCH, 1);
-	else
-		input_report_key(dev, BTN_TOUCH, 0);
-
-	alps_report_semi_mt_data(dev, fingers, x1, y1, x2, y2);
-
-	input_mt_report_finger_count(dev, fingers);
-
-	input_report_key(dev, BTN_LEFT, left);
-	input_report_key(dev, BTN_RIGHT, right);
-	input_report_key(dev, BTN_MIDDLE, middle);
-
-	if (z > 0) {
-		input_report_abs(dev, ABS_X, x);
-		input_report_abs(dev, ABS_Y, y);
-	}
-	input_report_abs(dev, ABS_PRESSURE, z);
-
-	input_sync(dev);
-}
-
 static void alps_process_packet(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
@@ -810,16 +707,10 @@ static void alps_process_packet(struct psmouse *psmouse)
 		alps_process_packet_v1_v2(psmouse);
 		break;
 	case ALPS_PROTO_V3:
-		alps_process_packet_v3_v5(psmouse);
+		alps_process_packet_v3(psmouse);
 		break;
 	case ALPS_PROTO_V4:
 		alps_process_packet_v4(psmouse);
-		break;
-	case ALPS_PROTO_V5:
-		alps_process_packet_v3_v5(psmouse);
-		break;
-	case ALPS_PROTO_V6:
-		alps_process_packet_v6(psmouse);
 		break;
 	}
 }
@@ -833,18 +724,12 @@ static void alps_report_bare_ps2_packet(struct psmouse *psmouse,
 
 	if (report_buttons)
 		alps_report_buttons(psmouse, dev2, psmouse->dev,
-				    packet[0] & 1, packet[0] & 2, packet[0] & 4);
+				packet[0] & 1, packet[0] & 2, packet[0] & 4);
 
 	input_report_rel(dev2, REL_X,
-			 packet[1] ? packet[1] - ((packet[0] << 4) & 0x100) : 0);
+		packet[1] ? packet[1] - ((packet[0] << 4) & 0x100) : 0);
 	input_report_rel(dev2, REL_Y,
-			 packet[2] ? ((packet[0] << 3) & 0x100) - packet[2] : 0);
-
-	/* log buttons, REL_X, REL_Y */
-	psmouse_dbg(psmouse, "bare_ps2_packet: %x %d %d\n",
-		    packet[0]&7,
-		    packet[1] - ((packet[0]<<4)&0x100),
-		    ((packet[0] << 3) & 0x100) - packet[2]);
+		packet[2] ? ((packet[0] << 3) & 0x100) - packet[2] : 0);
 
 	input_sync(dev2);
 }
@@ -881,7 +766,6 @@ static psmouse_ret_t alps_handle_interleaved_ps2(struct psmouse *psmouse)
 		      psmouse->packet[4] |
 		      psmouse->packet[5]) & 0x80) ||
 		    (!alps_is_valid_first_byte(priv->i, psmouse->packet[6]))) {
-
 			psmouse_dbg(psmouse,
 				    "refusing packet %x %x %x %x (suspected interleaved ps/2)\n",
 				    psmouse->packet[3], psmouse->packet[4],
@@ -902,7 +786,7 @@ static psmouse_ret_t alps_handle_interleaved_ps2(struct psmouse *psmouse)
 		 * packet in the middle of ALPS packet.
 		 *
 		 * There is also possibility that we got 6-byte ALPS
-		 * packet followed	by 3-byte packet from trackpoint. We
+		 * packet followed  by 3-byte packet from trackpoint. We
 		 * can not distinguish between these 2 scenarios but
 		 * because the latter is unlikely to happen in course of
 		 * normal operation (user would need to press all
@@ -966,7 +850,8 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
 
 	if ((psmouse->packet[0] & 0xc8) == 0x08) { /* PS/2 packet */
 		if (psmouse->pktcnt == 3) {
-			alps_report_bare_ps2_packet(psmouse, psmouse->packet, true);
+			alps_report_bare_ps2_packet(psmouse, psmouse->packet,
+						    true);
 			return PSMOUSE_FULL_PACKET;
 		}
 		return PSMOUSE_GOOD_DATA;
@@ -986,18 +871,13 @@ static psmouse_ret_t alps_process_byte(struct psmouse *psmouse)
 		return PSMOUSE_BAD_DATA;
 	}
 
-	/* This test is not valid for V6 multi-touch mode!
-	   Need to restructure this code down the road */
-	if (model->proto_version != ALPS_PROTO_V6) {
-
-		/* Bytes 2 - pktsize should have 0 in the highest bit */
-		if (psmouse->pktcnt >= 2 && psmouse->pktcnt <= psmouse->pktsize
-		    && (psmouse->packet[psmouse->pktcnt - 1] & 0x80)) {
-			psmouse_dbg(psmouse, "refusing packet[%i] = %x\n",
-				    psmouse->pktcnt - 1,
-				    psmouse->packet[psmouse->pktcnt - 1]);
-			return PSMOUSE_BAD_DATA;
-		}
+	/* Bytes 2 - pktsize should have 0 in the highest bit */
+	if (psmouse->pktcnt >= 2 && psmouse->pktcnt <= psmouse->pktsize &&
+	    (psmouse->packet[psmouse->pktcnt - 1] & 0x80)) {
+		psmouse_dbg(psmouse, "refusing packet[%i] = %x\n",
+			    psmouse->pktcnt - 1,
+			    psmouse->packet[psmouse->pktcnt - 1]);
+		return PSMOUSE_BAD_DATA;
 	}
 
 	if (psmouse->pktcnt == psmouse->pktsize) {
@@ -1024,20 +904,6 @@ static int alps_command_mode_send_nibble(struct psmouse *psmouse, int nibble)
 
 	if (ps2_command(ps2dev, param, command))
 		return -1;
-
-	return 0;
-}
-
-static int alps_command_mode_put_configword(struct psmouse *psmouse, uint16_t word)
-{
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
-	int i, nibble;
-
-	for (i = 12; i >= 0; i -= 4) {
-		nibble = (word >> i) & 0xf;
-		if (alps_command_mode_send_nibble(psmouse, nibble))
-			return -1;
-	}
 
 	return 0;
 }
@@ -1117,12 +983,7 @@ static int alps_enter_command_mode(struct psmouse *psmouse,
 		return -1;
 	}
 
-	/* Warning - cannot determine model yet because some devices have same
-	   E7 response but are differentiated by the command mode response
-	*/
-	if ((param[0] != 0x88 && param[1] != 0x07)	/* For V1-V5 */
-	    && (param[0] != 0x73 && param[1] != 0x01))	/* For V6 */
-	{
+	if (param[0] != 0x88 && param[1] != 0x07) {
 		psmouse_dbg(psmouse,
 			    "unknown response while entering command mode: %2.2x %2.2x %2.2x\n",
 			    param[0], param[1], param[2]);
@@ -1158,17 +1019,17 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 	 */
 	param[0] = 0;
 	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11))
+	    ps2_command(ps2dev,  NULL, PSMOUSE_CMD_SETSCALE11) ||
+	    ps2_command(ps2dev,  NULL, PSMOUSE_CMD_SETSCALE11) ||
+	    ps2_command(ps2dev,  NULL, PSMOUSE_CMD_SETSCALE11))
 		return NULL;
 
 	param[0] = param[1] = param[2] = 0xff;
 	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
 		return NULL;
 
-	psmouse_info(psmouse, "E6 report: %2.2x %2.2x %2.2x",
-		     param[0], param[1], param[2]);
+	psmouse_dbg(psmouse, "E6 report: %2.2x %2.2x %2.2x",
+		    param[0], param[1], param[2]);
 
 	if ((param[0] & 0xf8) != 0 || param[1] != 0 ||
 	    (param[2] != 10 && param[2] != 100))
@@ -1180,17 +1041,17 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 	 */
 	param[0] = 0;
 	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE21) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE21) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE21))
+	    ps2_command(ps2dev,  NULL, PSMOUSE_CMD_SETSCALE21) ||
+	    ps2_command(ps2dev,  NULL, PSMOUSE_CMD_SETSCALE21) ||
+	    ps2_command(ps2dev,  NULL, PSMOUSE_CMD_SETSCALE21))
 		return NULL;
 
 	param[0] = param[1] = param[2] = 0xff;
 	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
 		return NULL;
 
-	psmouse_info(psmouse, "E7 report: %2.2x %2.2x %2.2x",
-		     param[0], param[1], param[2]);
+	psmouse_dbg(psmouse, "E7 report: %2.2x %2.2x %2.2x",
+		    param[0], param[1], param[2]);
 
 	if (version) {
 		for (i = 0; i < ARRAY_SIZE(rates) && param[2] != rates[i]; i++)
@@ -1229,11 +1090,6 @@ static const struct alps_model_info *alps_get_model(struct psmouse *psmouse, int
 				psmouse_dbg(psmouse,
 					    "Unknown command mode response %2.2x\n",
 					    param[0]);
-			else
-				psmouse_dbg(psmouse, "Model=%d, proto_version=%d\n",
-					    i,
-					    model->proto_version);
-
 		}
 	}
 
@@ -1663,385 +1519,6 @@ error:
 	return -1;
 }
 
-static int alps_hw_init_v5(struct psmouse *psmouse)
-{
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
-	unsigned char param[4];
-
-	ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_DIS);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	param[0] = 0xc8;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	param[0] = 0x14;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	param[0] = 0x14;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0xc8;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	param[0] = 0x00;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0x01;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-	param[0] = 0x64;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_ENABLE);
-
-	return 0;
-}
-
-static int alps_hw_init_v5_mine(struct psmouse *psmouse)
-{
-	struct alps_data *priv = psmouse->private;
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
-	unsigned char param[4];
-	int reg_val;
-
-	priv->nibble_commands = alps_v3_nibble_commands;
-        priv->addr_command = PSMOUSE_CMD_RESET_WRAP;;
-
-	if (psmouse_reset(psmouse)) return -1;
-	if (psmouse_reset(psmouse)) return -1;
-
-        /* ??? bracketing around the put_configword() calls ? */
-	/* ALPS_CMD_NIBBLE_10 is the same as GETID, but expects only one byte */
-        ps2_command(ps2dev, param, ALPS_CMD_NIBBLE_10);
-
-        /* E6 report */
-	/* leaving this out, as I believe that the E6 report is mere
-         * diagnostics, not action. It has been queried already in
-	 * alps_get_model.
-	 *
-	param[0] = 0;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11) ||
-	    ps2_command(ps2dev,	 NULL, PSMOUSE_CMD_SETSCALE11))
-		return -1;
-	param[0] = param[1] = param[2] = 0xff;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO))
-		return -1;
-	*/
-	
-	/* E6 report already printed by get_model */
-
-
-	alps_command_mode_put_configword(psmouse, 0xe987);
-	alps_command_mode_put_configword(psmouse, 0xa997);
-
-        /* ??? */
-        ps2_command(ps2dev, param, ALPS_CMD_NIBBLE_10);
-
-
-        /* Set rate and enable data reporting */
-	param[0] = 0x64;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE))
-            goto alps_hw_init_v5_mine_error;
-	/* not clear what this call is for... */
-	param[0] = 0x03;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRES))
-            goto alps_hw_init_v5_mine_error;
-
-	/*
-        if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE))
-            goto alps_hw_init_v5_mine_error;
-        if (ps2_command(ps2dev, NULL, PSMOUSE_CMD_DISABLE))
-            goto alps_hw_init_v5_mine_error;
-	*/
-
-        /* make sure we're out of command mode ? */
-	/*
-	if (alps_exit_command_mode(psmouse))
-		goto alps_hw_init_v5_mine_error;
-	*/
-
-	if (alps_enter_command_mode(psmouse, NULL))
-		goto alps_hw_init_v5_mine_error;
-
-	reg_val = alps_command_mode_read_reg(psmouse, 0xc2c8);
-	if (reg_val != 0x00)
-		goto alps_hw_init_v5_mine_error;
-
-	reg_val = alps_command_mode_read_reg(psmouse, 0xc2c4);
-	if (reg_val != 0x00)
-		goto alps_hw_init_v5_mine_error;
-	if (__alps_command_mode_write_reg(psmouse, 0x02))
-		goto alps_hw_init_v5_mine_error;
-
-	reg_val = alps_command_mode_read_reg(psmouse, 0xc2d9);
-	if (reg_val != 0x00)
-		goto alps_hw_init_v5_mine_error;
-	/*
-	*/
-
-	if (alps_command_mode_write_reg(psmouse, 0xc2cb, 0x00))
-		goto alps_hw_init_v5_mine_error;
-
-	reg_val = alps_command_mode_read_reg(psmouse, 0xc2c8);
-	if (reg_val != 0x00)
-		goto alps_hw_init_v5_mine_error;
-	/*
-	if (__alps_command_mode_write_reg(psmouse, 0x00))
-		goto alps_hw_init_v5_mine_error;
-	*/
-
-	alps_exit_command_mode(psmouse);
-
-	/* Set rate and enable data reporting */
-	param[0] = 0x64;
-	if (ps2_command(ps2dev, param, PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE)) {
-		psmouse_err(psmouse, "Failed to enable data reporting\n");
-		return -1;
-	}
-
-	return 0;
-alps_hw_init_v5_mine_error:
-	/*
-	 * Leaving the touchpad in command mode will essentially render
-	 * it unusable until the machine reboots, so exit it here just
-	 * to be safe
-	 */
-	alps_exit_command_mode(psmouse);
-	return -1;
-}
-
-static int alps_hw_init_v6(struct psmouse *psmouse)
-{
-	struct alps_data *priv = psmouse->private;
-	struct ps2dev *ps2dev = &psmouse->ps2dev;
-	unsigned char param[4];
-
-	/* Doesn't seem to be necessary but we keep here in case
-	   registers need to be used */
-	priv->nibble_commands = alps_v3_nibble_commands;
-
-	priv->addr_command = PSMOUSE_CMD_RESET_WRAP;
-	ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
-	if (param[0] != PSMOUSE_RET_BAT && param[1] != PSMOUSE_RET_ID)
-		psmouse_dbg(psmouse, "Bad reset %2.2x %2.2x",
-			    param[0], param[1]);
-
-	ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
-	if (param[0] != PSMOUSE_RET_BAT && param[1] != PSMOUSE_RET_ID)
-		psmouse_dbg(psmouse, "Bad reset %2.2x %2.2x",
-			    param[0], param[1]);
-
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETID);
-
-	/* E6 report */
-	param[0] = 0;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRES);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-
-	/* ?? */
-	param[0] = 0x03;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRES);
-
-	/* Set 9-byte to 8-byte */
-	param[0] = 0xc8;
-	param[1] = 0x64;
-	param[2] = 0x50;
-	if (ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, &param[2], PSMOUSE_CMD_SETRATE) ||
-	    ps2_command(ps2dev, param, PSMOUSE_CMD_GETID))
-		return -1;
-
-	/* Set rate and enable data reporting? */
-	param[0] = 0xc8;
-	param[1] = 0x50;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_GETID);
-
-	param[0] = 0x64;
-	param[1] = 0x03;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRES);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_DISABLE);
-
-	ps2_command(ps2dev, param, PSMOUSE_CMD_RESET_BAT);
-	if (param[0] != PSMOUSE_RET_BAT && param[1] != PSMOUSE_RET_ID)
-		psmouse_dbg(psmouse, "Bad reset %2.2x %2.2x",
-			    param[0], param[1]);
-
-	/* E7 report */
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-
-	/* Enter command mode */
-	alps_enter_command_mode(psmouse, param);
-
-	/* exit command mode */
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-	/* param should be bf 1a 04 */
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-	ps2_command(ps2dev, param, PSMOUSE_CMD_GETINFO);
-	/* param should be 89 95 84 */
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	param[0] = 0x28;
-	param[1] = 0x50;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE);
-
-	/* Enter command mode */
-	alps_enter_command_mode(psmouse, param);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_DIS);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-
-	param[0] = 0x64;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_RESET_WRAP);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE21);
-	param[0] = 0x64;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETPOLL);
-
-	/* out of cmd mode? */
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_DISABLE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-
-	param[0] = 0x64;
-	param[1] = 0x28;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-
-	param[0] = 0x50;
-	param[1] = 0x0a;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, &param[1], PSMOUSE_CMD_SETRATE);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSTREAM);
-
-	param[0] = 0x50;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRATE);
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_SETSCALE11);
-
-	param[0] = 0x03;
-	ps2_command(ps2dev, &param[0], PSMOUSE_CMD_SETRES);
-
-	ps2_command(ps2dev, NULL, PSMOUSE_CMD_ENABLE);
-
-	return 0;
-}
-
 static int alps_hw_init(struct psmouse *psmouse)
 {
 	struct alps_data *priv = psmouse->private;
@@ -2058,12 +1535,6 @@ static int alps_hw_init(struct psmouse *psmouse)
 		break;
 	case ALPS_PROTO_V4:
 		ret = alps_hw_init_v4(psmouse);
-		break;
-	case ALPS_PROTO_V5:
-		ret = alps_hw_init_v5_mine(psmouse);
-		break;
-	case ALPS_PROTO_V6:
-		ret = alps_hw_init_v6(psmouse);
 		break;
 	}
 
@@ -2148,45 +1619,17 @@ int alps_init(struct psmouse *psmouse)
 		break;
 	case ALPS_PROTO_V3:
 	case ALPS_PROTO_V4:
-	case ALPS_PROTO_V5:
 		set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
 		input_mt_init_slots(dev1, 2);
-		ALPS_BITMAP_X_BITS = 15;
-		ALPS_BITMAP_Y_BITS = 11;
-		ALPS_X_MAX = 2000;
-		ALPS_Y_MAX = 1400;
-		input_set_abs_params(dev1,
-				     ABS_MT_POSITION_X, 0, ALPS_X_MAX, 0, 0);
-		input_set_abs_params(dev1,
-				     ABS_MT_POSITION_Y, 0, ALPS_Y_MAX, 0, 0);
+		input_set_abs_params(dev1, ABS_MT_POSITION_X, 0, ALPS_V3_X_MAX, 0, 0);
+		input_set_abs_params(dev1, ABS_MT_POSITION_Y, 0, ALPS_V3_Y_MAX, 0, 0);
 
 		set_bit(BTN_TOOL_DOUBLETAP, dev1->keybit);
 		set_bit(BTN_TOOL_TRIPLETAP, dev1->keybit);
 		set_bit(BTN_TOOL_QUADTAP, dev1->keybit);
 
-		input_set_abs_params(dev1, ABS_X, 0, ALPS_X_MAX, 0, 0);
-		input_set_abs_params(dev1, ABS_Y, 0, ALPS_Y_MAX, 0, 0);
-		break;
-	case ALPS_PROTO_V6:
-		set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
-		ALPS_BITMAP_X_BITS = 23;
-		ALPS_BITMAP_Y_BITS = 12;
-		ALPS_X_MAX = 1360;
-		ALPS_Y_MAX =  660;
-
-		input_mt_init_slots(dev1, 2);
-		input_set_abs_params(dev1,
-				     ABS_MT_POSITION_X, 0, ALPS_X_MAX, 0, 0);
-		input_set_abs_params(dev1,
-				     ABS_MT_POSITION_Y, 0, ALPS_Y_MAX, 0, 0);
-
-		set_bit(BTN_TOOL_DOUBLETAP, dev1->keybit);
-		set_bit(BTN_TOOL_TRIPLETAP, dev1->keybit);
-		set_bit(BTN_TOOL_QUADTAP, dev1->keybit);
-
-		input_set_abs_params(dev1, ABS_X, 0, ALPS_X_MAX, 0, 0);
-		input_set_abs_params(dev1, ABS_Y, 0, ALPS_Y_MAX, 0, 0);
-
+		input_set_abs_params(dev1, ABS_X, 0, ALPS_V3_X_MAX, 0, 0);
+		input_set_abs_params(dev1, ABS_Y, 0, ALPS_V3_Y_MAX, 0, 0);
 		break;
 	}
 
@@ -2215,7 +1658,7 @@ int alps_init(struct psmouse *psmouse)
 	dev2->phys = priv->phys;
 	dev2->name = (model->flags & ALPS_DUALPOINT) ? "DualPoint Stick" : "PS/2 Mouse";
 	dev2->id.bustype = BUS_I8042;
-	dev2->id.vendor	 = 0x0002;
+	dev2->id.vendor  = 0x0002;
 	dev2->id.product = PSMOUSE_ALPS;
 	dev2->id.version = 0x0000;
 	dev2->dev.parent = &psmouse->ps2dev.serio->dev;
@@ -2259,8 +1702,9 @@ int alps_detect(struct psmouse *psmouse, bool set_properties)
 	if (set_properties) {
 		psmouse->vendor = "ALPS";
 		psmouse->name = model->flags & ALPS_DUALPOINT ?
-			"DualPoint TouchPad" : "GlidePoint";
+				"DualPoint TouchPad" : "GlidePoint";
 		psmouse->model = version;
 	}
 	return 0;
 }
+
