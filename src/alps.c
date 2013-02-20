@@ -30,6 +30,7 @@
 #include <linux/input/mt.h>
 #include <linux/serio.h>
 #include <linux/libps2.h>
+#include <linux/version.h>
 
 #include "psmouse.h"
 #include "alps.h"
