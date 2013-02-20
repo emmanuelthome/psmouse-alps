@@ -1975,7 +1975,7 @@ int alps_init(struct psmouse *psmouse)
 	case ALPS_PROTO_V3:
 	case ALPS_PROTO_V4:
 		set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3.6.0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0)
 		input_mt_init_slots(dev1, 2);
 #else
         input_mt_init_slots(dev1, 2, 0);
@@ -1998,7 +1998,7 @@ int alps_init(struct psmouse *psmouse)
 		break;
 	case ALPS_PROTO_V5:
 		set_bit(INPUT_PROP_SEMI_MT, dev1->propbit);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3.6.0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0)
 		input_mt_init_slots(dev1, 2);
 #else
         input_mt_init_slots(dev1, 2, 0);
@@ -2026,7 +2026,7 @@ int alps_init(struct psmouse *psmouse)
 		ALPS_X_MAX = 1360;
 		ALPS_Y_MAX =  660;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3.6.0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0)
 		input_mt_init_slots(dev1, 2);
 #else
         input_mt_init_slots(dev1, 2, 0);

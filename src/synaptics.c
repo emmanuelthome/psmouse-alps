@@ -1152,7 +1152,7 @@ static void set_input_params(struct input_dev *dev, struct synaptics_data *priv)
 	input_set_abs_params(dev, ABS_PRESSURE, 0, 255, 0, 0);
 
 	if (SYN_CAP_IMAGE_SENSOR(priv->ext_cap_0c)) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3.6.0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0)
 		input_mt_init_slots(dev, 2);
 #else
         input_mt_init_slots(dev, 2, 0);
@@ -1168,7 +1168,7 @@ static void set_input_params(struct input_dev *dev, struct synaptics_data *priv)
 	} else if (SYN_CAP_ADV_GESTURE(priv->ext_cap_0c)) {
 		/* Non-image sensors with AGM use semi-mt */
 		__set_bit(INPUT_PROP_SEMI_MT, dev->propbit);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3.6.0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0)
 		input_mt_init_slots(dev, 2);
 #else
         input_mt_init_slots(dev, 2, 0);
